@@ -55,6 +55,11 @@ pub enum Action {
     ListDir {
         path: String,
     },
+    RunCommand {
+        command: String,
+        cwd: Option<String>,
+        timeout: Option<u32>,
+    },
 }
 
 impl Action {
@@ -64,6 +69,7 @@ impl Action {
             Action::WriteFile { .. } => "WRITE_FILE",
             Action::EditFile { .. } => "EDIT_FILE",
             Action::ListDir { .. } => "LIST_DIR",
+            Action::RunCommand { .. } => "RUN_COMMAND",
         }
     }
 
@@ -73,6 +79,7 @@ impl Action {
             | Action::WriteFile { path, .. }
             | Action::EditFile { path, .. }
             | Action::ListDir { path } => path,
+            Action::RunCommand { command, .. } => command,
         }
     }
 }
@@ -117,6 +124,15 @@ pub fn action_label(action: &Action) -> String {
             )
         }
         Action::ListDir { path } => format!("LIST_DIR {path}"),
+        Action::RunCommand { command, .. } => {
+            let trimmed = command.trim();
+            if trimmed.chars().count() > 60 {
+                let short: String = trimmed.chars().take(60).collect();
+                format!("RUN_COMMAND {short}…")
+            } else {
+                format!("RUN_COMMAND {trimmed}")
+            }
+        }
     }
 }
 
@@ -157,6 +173,12 @@ path: src
 ```
 Explore a directory to see what exists.
 
+```tool
+RUN_COMMAND
+command: cargo build --release
+```
+Run a shell command (build, tests, scripts). The user is asked to confirm every command. Optional keys: `cwd: <subdir>`, `timeout: <seconds, max 300>`. Never use it for file changes - use the file tools.
+
 HOW TO WORK
 1. Understand what exists first: use LIST_DIR and READ_FILE before changing anything.
 2. One fenced block holds exactly one action; you may emit several blocks per reply.
@@ -167,7 +189,7 @@ HOW TO WORK
 
 RULES
 - Never use JSON. Only the fenced tool blocks shown above.
-- Never invent tool names or keys: READ_FILE, WRITE_FILE, EDIT_FILE, LIST_DIR.
+- Never invent tool names or keys: READ_FILE, WRITE_FILE, EDIT_FILE, LIST_DIR, RUN_COMMAND.
 - Do not only describe planned changes — make them with the tools.
 - Paths are relative to the project root.
 - Never write a line containing only END_OF_CONTENT inside file content.
@@ -211,15 +233,16 @@ mod doc_tests {
         );
         assert_eq!(
             p.actions.len(),
-            6,
-            "expected 4 syntax examples + 2 example-of-change blocks: {:?}",
+            7,
+            "expected 5 syntax examples + 2 example-of-change blocks: {:?}",
             p.actions
         );
         assert!(matches!(p.actions[0], Action::ReadFile { .. }));
         assert!(matches!(p.actions[1], Action::WriteFile { .. }));
         assert!(matches!(p.actions[2], Action::EditFile { .. }));
         assert!(matches!(p.actions[3], Action::ListDir { .. }));
-        assert!(matches!(p.actions[4], Action::ReadFile { .. }));
-        assert!(matches!(p.actions[5], Action::EditFile { .. }));
+        assert!(matches!(p.actions[4], Action::RunCommand { .. }));
+        assert!(matches!(p.actions[5], Action::ReadFile { .. }));
+        assert!(matches!(p.actions[6], Action::EditFile { .. }));
     }
 }

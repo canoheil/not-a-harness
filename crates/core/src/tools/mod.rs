@@ -6,12 +6,16 @@
 //! * destructive writes (`WRITE_FILE` over an existing file, `EDIT_FILE`)
 //!   require an explicit confirmation carrying a preview diff, unless the
 //!   user launched with auto-approve;
+//! * `RUN_COMMAND` always shows the command for confirmation first, runs
+//!   it in the project root with a hard timeout, and caps its output;
 //! * tool output is size-capped so a huge file can't blow the context.
 
 pub mod diff;
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::error::CoreError;
 use crate::protocol::Action;
@@ -144,6 +148,13 @@ impl ToolKit {
                 .edit_file(path, search, replace, confirm)
                 .map_err(err_string),
             Action::ListDir { path } => self.list_dir(path).map_err(err_string),
+            Action::RunCommand {
+                command,
+                cwd,
+                timeout,
+            } => self
+                .run_command(command, cwd.as_deref(), timeout.unwrap_or(30), confirm)
+                .map_err(err_string),
         };
         match result {
             Ok(body) => {
@@ -346,6 +357,199 @@ impl ToolKit {
         }
         Ok(out)
     }
+
+    /// Execute a shell command inside the project root. Always shows the
+    /// command for confirmation first (or launch-time auto-approve); the
+    /// process is killed on timeout and its output is size-capped.
+    fn run_command(
+        &self,
+        command: &str,
+        cwd: Option<&str>,
+        timeout_s: u32,
+        confirm: &mut dyn FnMut(&ConfirmRequest) -> bool,
+    ) -> Result<String, CoreError> {
+        let timeout_s = timeout_s.clamp(1, 300);
+        let dir = match cwd {
+            Some(d) => {
+                let p = self.resolve(d)?;
+                if !p.is_dir() {
+                    return Err(CoreError::Tool(format!("'{d}' is not a directory")));
+                }
+                p
+            }
+            None => self.root.clone(),
+        };
+        #[cfg(windows)]
+        let shell_desc = "cmd /C";
+        #[cfg(not(windows))]
+        let shell_desc = "sh -c";
+
+        let mut preview = format!(
+            "shell: {shell_desc}\nruns in: {}\ntimeout: {timeout_s}s",
+            dir.display()
+        );
+        if looks_destructive(command) {
+            preview.push_str("\n! warning: this command looks destructive");
+        }
+        let request = ConfirmRequest {
+            verb: "RUN_COMMAND",
+            path: command.to_string(),
+            preview,
+            is_new_file: false,
+        };
+        if !confirm(&request) {
+            return Err(CoreError::Tool(format!(
+                "command '{command}' was rejected by the user"
+            )));
+        }
+
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = Command::new("cmd");
+            c.arg("/C");
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut c = Command::new("sh");
+            c.arg("-c");
+            c
+        };
+        cmd.arg(command).current_dir(&dir).stdin(Stdio::null());
+
+        // Capture output via temp files, not pipes: a killed shell's
+        // grandchildren must never block us waiting for pipe EOF.
+        let stamp = std::process::id();
+        let out_path = std::env::temp_dir().join(format!("nah_cmd_out_{stamp}"));
+        let err_path = std::env::temp_dir().join(format!("nah_cmd_err_{stamp}"));
+        let out_file =
+            fs::File::create(&out_path).map_err(|e| CoreError::Tool(format!("temp file: {e}")))?;
+        let err_file =
+            fs::File::create(&err_path).map_err(|e| CoreError::Tool(format!("temp file: {e}")))?;
+        cmd.stdout(Stdio::from(out_file));
+        cmd.stderr(Stdio::from(err_file));
+
+        // run in its own process group (unix) so a timeout can kill the
+        // whole tree, not just the shell
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    if setpgid(0, 0) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| CoreError::Tool(format!("cannot start command: {e}")))?;
+
+        let deadline = Instant::now() + Duration::from_secs(timeout_s as u64);
+        let mut timed_out = false;
+        let code = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status.code(),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        timed_out = true;
+                        kill_tree(&mut child);
+                        break None;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => {
+                    kill_tree(&mut child);
+                    break None;
+                }
+            }
+        };
+        let out_bytes = fs::read(&out_path).unwrap_or_default();
+        let err_bytes = fs::read(&err_path).unwrap_or_default();
+        let out_text = String::from_utf8_lossy(&out_bytes);
+        let err_text = String::from_utf8_lossy(&err_bytes);
+        let _ = fs::remove_file(&out_path);
+        let _ = fs::remove_file(&err_path);
+
+        let mut body = if timed_out {
+            format!("timed out after {timeout_s}s (process killed)\n")
+        } else {
+            match code {
+                Some(c) => format!("exit code: {c}\n"),
+                None => "terminated abnormally\n".to_string(),
+            }
+        };
+        body.push_str("--- stdout ---\n");
+        body.push_str(&out_text);
+        if !out_text.is_empty() && !out_text.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str("--- stderr ---\n");
+        body.push_str(&err_text);
+        if body.len() > self.max_tool_bytes {
+            // truncate on a char boundary - panics otherwise on multibyte text
+            let mut cut = self.max_tool_bytes.min(body.len());
+            while cut > 0 && !body.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            body.truncate(cut);
+            body.push_str("\n... truncated by harness");
+        }
+        Ok(body)
+    }
+}
+
+/// Kill a spawned command and everything it spawned. On unix the child
+/// runs in its own process group (set in pre_exec), so one signal to the
+/// group takes the whole tree; on Windows `taskkill /T` walks the tree.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        // SIGKILL to the child's process group (pgid == child pid)
+        kill(-(child.id() as i32), 9);
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn setpgid(pid: i32, pgid: i32) -> i32;
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// Heuristic for the confirmation dialog - display only, not a security
+/// boundary (the confirmation itself is the gate).
+fn looks_destructive(command: &str) -> bool {
+    let lower = command.to_lowercase();
+    [
+        "rm -rf",
+        "rm -fr",
+        "rm -r /",
+        "del /f",
+        "rd /s",
+        "format c",
+        "mkfs",
+        "dd if=",
+        "> /dev/sd",
+        "reg delete",
+        ":(){",
+        "shutdown",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
 }
 
 fn err_string(e: CoreError) -> String {
@@ -421,6 +625,77 @@ mod tests {
         assert!(k.resolve("../evil").is_err());
         assert!(k.resolve("/etc/passwd").is_err());
         assert!(k.resolve("a/../../evil").is_err());
+    }
+
+    #[test]
+    fn run_command_executes_and_reports() {
+        let dir = std::env::temp_dir().join("nah_test_rc_exec");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let k = kit(&dir);
+        let action = Action::RunCommand {
+            command: "echo nah-test-ok".to_string(),
+            cwd: None,
+            timeout: Some(10),
+        };
+        let out = k.run(&action, &mut auto);
+        assert!(!out.is_error, "{}", out.body);
+        assert!(out.body.contains("exit code: 0"), "{}", out.body);
+        assert!(out.body.contains("nah-test-ok"), "{}", out.body);
+        assert!(!out.changed, "commands never count as file changes");
+    }
+
+    #[test]
+    fn run_command_rejection_is_an_error() {
+        let dir = std::env::temp_dir().join("nah_test_rc_reject");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let k = kit(&dir);
+        let action = Action::RunCommand {
+            command: "echo should-not-run".to_string(),
+            cwd: None,
+            timeout: Some(10),
+        };
+        let out = k.run(&action, &mut |_: &ConfirmRequest| false);
+        assert!(out.is_error);
+        assert!(out.body.contains("rejected by the user"), "{}", out.body);
+    }
+
+    #[test]
+    fn run_command_cwd_is_sandboxed() {
+        let dir = std::env::temp_dir().join("nah_test_rc_cwd");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let k = kit(&dir);
+        let action = Action::RunCommand {
+            command: "echo hi".to_string(),
+            cwd: Some("../evil".to_string()),
+            timeout: Some(10),
+        };
+        let out = k.run(&action, &mut auto);
+        assert!(out.is_error, "{}", out.body);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_timeout_kills() {
+        let dir = std::env::temp_dir().join("nah_test_rc_timeout");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let k = kit(&dir);
+        let action = Action::RunCommand {
+            command: "sleep 5".to_string(),
+            cwd: None,
+            timeout: Some(1),
+        };
+        let started = std::time::Instant::now();
+        let out = k.run(&action, &mut auto);
+        assert!(
+            started.elapsed().as_secs() < 4,
+            "kill must not wait for sleep"
+        );
+        assert!(!out.is_error, "{}", out.body);
+        assert!(out.body.contains("timed out"), "{}", out.body);
     }
 
     #[test]

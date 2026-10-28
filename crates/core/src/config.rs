@@ -85,7 +85,7 @@ Options:
   --history <n>          trailing messages always kept (default: 5)
   --steps <n>            max model<->tool round trips per turn (default: 8)
   --temperature <f>      sampling temperature (default: 0.2)
-  --yes                  auto-approve file writes/edits
+  --yes                  auto-approve file writes/edits and command runs
   --no-color             disable colors
   --no-compact           disable automatic history summarization
   --width <n>            override terminal width for text wrapping

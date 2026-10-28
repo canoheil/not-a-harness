@@ -185,6 +185,10 @@ impl<'a> Session<'a> {
                     Action::WriteFile { path, .. } | Action::EditFile { path, .. } => {
                         self.context.invalidate_file(path);
                     }
+                    Action::RunCommand { .. } => {
+                        // a command may touch any file - drop all cached contents
+                        self.context.reset();
+                    }
                     _ => {}
                 }
                 on_event(&Event::ToolResult(&output));
@@ -254,6 +258,11 @@ fn action_signature(action: &Action) -> String {
             replace,
         } => format!("E:{path}:{}:{}", h(search), h(replace)),
         Action::ListDir { path } => format!("L:{path}"),
+        Action::RunCommand {
+            command,
+            cwd,
+            timeout,
+        } => format!("C:{command}:{cwd:?}:{timeout:?}"),
     }
 }
 

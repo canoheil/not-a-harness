@@ -4,7 +4,7 @@
 
 `nah` یک ایجنت کدنویس است که به مدل لوکال شما (از طریق Ollama یا هر سرور سازگار با OpenAI مثل llama.cpp / LM Studio) وصل می‌شود، فایل‌ها را می‌خواند و می‌نویسد، و با یک پروتکل **متنی ساده** با مدل ارتباط برقرار می‌کند — چون مدل‌های کوچیک (مثل Qwen2.5-Coder) توی JSON گم می‌شوند.
 
-> **English summary:** `nah` is a lean, dependency-free (std-only Rust) coding-agent harness for local LLMs. Instead of JSON tool-calling, models emit simple fenced `tool` blocks (`READ_FILE`, `WRITE_FILE`, `EDIT_FILE`, `LIST_DIR`) that are parsed by a line-oriented state machine. It keeps prompts inside a fixed token budget (working set of files + rolling summary), gates every file write behind a confirmation diff, and ships an English (Claude-Code style) terminal UI with correct RTL rendering for Persian/Arabic content. A first-run setup wizard configures the provider and default model. Phase 2 adds a Tauri GUI. MIT licensed.
+> **English summary:** `nah` is a lean, dependency-free (std-only Rust) coding-agent harness for local LLMs. Instead of JSON tool-calling, models emit simple fenced `tool` blocks (`READ_FILE`, `WRITE_FILE`, `EDIT_FILE`, `LIST_DIR`, `RUN_COMMAND`) that are parsed by a line-oriented state machine. It keeps prompts inside a fixed token budget (working set of files + rolling summary), gates every file write and shell command behind a confirmation, and ships an English (Claude-Code style) terminal UI with correct RTL rendering for Persian/Arabic content. A first-run setup wizard configures the provider and default model. Phase 2 adds a Tauri GUI. MIT licensed.
 
 ---
 
@@ -79,10 +79,16 @@ let a = 2;
 LIST_DIR
 path: src
 ```
+
+```tool
+RUN_COMMAND
+command: cargo build --release
+```
 ````
 
 - پارسر **state machine** هست (نه regex): بلاک‌های ناقص یا نامعتبر هرگز اجرا نمیشن و به متن برمیگردن.
 - `EDIT_FILE` فقط وقتی کار میکنه که متن SEARCH دقیقاً **یک‌جا** پیدا بشه (مثل Aider).
+- `RUN_COMMAND` (اجرای شل برای build/test/run) **همیشه** اول دستور را نشان میدهد و تأیید میگیره (یا با `--yes` تأیید خودکار)؛ در ریشه‌ی پروژه اجرا میشه (با `cwd:` قابل تغییر، محدود به sandbox)، timeout سخت داره و خروجی‌اش سقف‌داره. دستورات مخرب با هشدار قرمز نشان داده میشن.
 - نتیجه‌ی هر ابزار به‌صورت متن ساده به مدل برمیگرده.
 
 ## ⚙️ تنظیمات
