@@ -153,10 +153,14 @@ impl Ui {
         if rtl_glyphs_available() != Some(false) {
             return;
         }
+        let font_desc = match console_font_name() {
+            Some(name) => format!("current console font: '{name}'"),
+            None => "current console font".to_string(),
+        };
         println!();
-        self.info(
-            "note: this console's font has no Persian/Arabic glyphs - RTL text shows as boxes.",
-        );
+        self.info(&format!(
+            "note: {font_desc} has no Persian/Arabic glyphs - RTL text shows as boxes."
+        ));
         self.info(
             "      this also affects the terminal's own echo of typed input (not a nah bug).",
         );
@@ -361,6 +365,26 @@ pub fn rtl_glyphs_available() -> Option<bool> {
 
 #[cfg(not(windows))]
 pub fn rtl_glyphs_available() -> Option<bool> {
+    None
+}
+
+/// Name of the active console font (Windows only).
+#[cfg(windows)]
+pub fn console_font_name() -> Option<String> {
+    let info = win::current_font_info()?;
+    let len = info
+        .face_name
+        .iter()
+        .position(|&u| u == 0)
+        .unwrap_or(info.face_name.len());
+    if len == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&info.face_name[..len]))
+}
+
+#[cfg(not(windows))]
+pub fn console_font_name() -> Option<String> {
     None
 }
 

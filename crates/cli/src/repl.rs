@@ -4,8 +4,6 @@
 //! the terminal emulator renders the echo with proper BiDi, so Persian /
 //! Arabic input displays correctly without any in-process text shaping.
 
-use std::io::BufRead;
-
 use nah_core::config::NahConfig;
 use nah_core::context::ContextManager;
 use nah_core::error::CoreError;
@@ -56,14 +54,20 @@ impl<'a> Repl<'a> {
         println!();
 
         let stdin = std::io::stdin();
-        let mut lines = stdin.lock().lines();
         loop {
             self.ui.prompt();
-            let Some(line) = lines.next() else {
+            // Read one line per prompt with a *fresh* lock on stdin. Holding
+            // `stdin.lock().lines()` across the loop would keep the global
+            // stdin mutex locked and deadlock every later read_line (confirm
+            // dialogs, /setup wizard).
+            let mut line = String::new();
+            let n = stdin
+                .read_line(&mut line)
+                .map_err(|e| CoreError::Io(e.to_string()))?;
+            if n == 0 {
                 println!();
                 break; // EOF
-            };
-            let line = line.map_err(|e| CoreError::Io(e.to_string()))?;
+            }
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -148,7 +152,16 @@ impl<'a> Repl<'a> {
                 if let Err(e) = setup::run(&self.ui, &mut self.config) {
                     self.ui.error(&e.to_string());
                 } else {
-                    self.sync_session_config();
+                    // reconnect: URL or provider kind may have changed
+                    match nah_core::provider::connect(self.config.provider, &self.config.url) {
+                        Ok(p) => {
+                            self.session.provider = p;
+                            self.sync_session_config();
+                        }
+                        Err(e) => self
+                            .ui
+                            .error(&format!("saved config, but reconnect failed: {e}")),
+                    }
                 }
             }
             "models" => match self.session.provider.list_models() {

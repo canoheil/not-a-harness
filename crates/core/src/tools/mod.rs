@@ -94,8 +94,20 @@ impl ToolKit {
         }
         let joined = self.root.join(&clean);
 
-        // belt & braces: if the path exists, its canonical form must stay in root
-        if let (Ok(real), Ok(real_root)) = (joined.canonicalize(), self.root.canonicalize()) {
+        // belt & braces: the final path - or, for files that do not exist
+        // yet, their nearest existing ancestor - must stay inside the root,
+        // even through symlinked directories.
+        let mut probe = joined.as_path();
+        let real = loop {
+            match probe.canonicalize() {
+                Ok(real) => break Some(real),
+                Err(_) => match probe.parent() {
+                    Some(parent) => probe = parent,
+                    None => break None,
+                },
+            }
+        };
+        if let (Some(real), Ok(real_root)) = (real, self.root.canonicalize()) {
             if !real.starts_with(&real_root) {
                 return Err(CoreError::Tool(format!(
                     "path escapes the project root via a symlink: '{rel}'"
@@ -185,7 +197,12 @@ impl ToolKit {
             all.len()
         );
         if body.len() > self.max_tool_bytes {
-            body.truncate(self.max_tool_bytes);
+            // truncate on a char boundary - panics otherwise on multibyte text
+            let mut cut = self.max_tool_bytes.min(body.len());
+            while cut > 0 && !body.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            body.truncate(cut);
             body.push_str("\n// ... truncated by harness (use offset:/limit: to read more)\n");
         } else if end < all.len() {
             header.push_str(&format!(
@@ -493,5 +510,57 @@ mod tests {
         assert!(r.body.contains('b'));
         assert!(r.body.contains('c'));
         assert!(!r.body.contains('a'));
+    }
+
+    #[test]
+    fn truncation_is_multibyte_safe() {
+        // regression: String::truncate panics when the byte limit lands
+        // inside a multibyte char (very common with Persian content)
+        let dir = std::env::temp_dir().join("nah_test_trunc_utf8");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // max_tool_bytes=5 lands in the middle of the 2-byte 'س'
+        let k = ToolKit::new(dir.clone(), 5);
+        fs::write(dir.join("fa.txt"), "سلام دنیا\n").unwrap();
+        let out = k.run(
+            &Action::ReadFile {
+                path: "fa.txt".into(),
+                offset: None,
+                limit: None,
+            },
+            &mut auto,
+        );
+        assert!(!out.is_error, "{}", out.body);
+        assert!(out.body.contains("truncated"), "{}", out.body);
+    }
+
+    #[test]
+    fn write_through_symlinked_parent_is_blocked() {
+        let base = std::env::temp_dir().join("nah_test_symlink");
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        // root/link -> outside (symlink). Windows may lack symlink perms,
+        // so skip silently if we cannot create one.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            if symlink(&outside, root.join("link")).is_err() {
+                return;
+            }
+            let k = kit(&root);
+            // the file does not exist yet - the old check missed this case
+            let w = k.run(
+                &Action::WriteFile {
+                    path: "link/evil.txt".into(),
+                    content: "x".into(),
+                },
+                &mut auto,
+            );
+            assert!(w.is_error, "symlink escape must be rejected");
+            assert!(!outside.join("evil.txt").exists());
+        }
     }
 }

@@ -107,7 +107,10 @@ impl Json {
             Json::Bool(true) => out.push_str("true"),
             Json::Bool(false) => out.push_str("false"),
             Json::Num(n) => {
-                if n.fract() == 0.0 && n.is_finite() && n.abs() < 1e15 {
+                if !n.is_finite() {
+                    // JSON has no NaN/Infinity - keep the output valid
+                    out.push_str("null");
+                } else if n.fract() == 0.0 && n.abs() < 1e15 {
                     out.push_str(&format!("{}", *n as i64));
                 } else {
                     out.push_str(&format!("{n}"));
