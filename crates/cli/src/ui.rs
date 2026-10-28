@@ -22,10 +22,115 @@ use std::sync::Mutex;
 use crate::spinner::Spinner;
 use crate::wrap::{terminal_width, wrap_line, WordWrapper};
 
+/// Streaming display filter: hides ```tool blocks from the user (the
+/// `tool:` lines + confirm dialog already narrate the action) while
+/// keeping prose visible as it streams. Mirrors the parser's fence rules,
+/// including WRITE_FILE content sections that may contain inner fences.
+pub struct ToolBlockFilter {
+    hold: String,
+    in_block: bool,
+    saw_kind: bool,
+    is_write: bool,
+    in_content: bool,
+    seen_eoc: bool,
+}
+
+impl ToolBlockFilter {
+    pub fn new() -> ToolBlockFilter {
+        ToolBlockFilter {
+            hold: String::new(),
+            in_block: false,
+            saw_kind: false,
+            is_write: false,
+            in_content: false,
+            seen_eoc: false,
+        }
+    }
+
+    /// Feed streamed model text; returns the part that should be shown.
+    pub fn push(&mut self, text: &str) -> String {
+        self.hold.push_str(text);
+        let mut out = String::new();
+        while let Some(pos) = self.hold.find('\n') {
+            let line: String = self.hold.drain(..=pos).collect();
+            let line = line.trim_end_matches(['\n', '\r']);
+            if self.feed_line(line) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        // decide about the partial remainder: hold anything that could
+        // still grow into a fence line, emit the rest immediately
+        let rem = self.hold.trim_end_matches('\r');
+        if rem.is_empty() {
+            // nothing pending
+        } else if self.in_block {
+            // inside a block everything is hidden; keep the partial line
+            // buffered in case it is the (possibly split) closing fence
+        } else {
+            let t = rem.trim_end();
+            if "```tool".starts_with(t) || "```".starts_with(t) {
+                // could become a fence - wait for more
+            } else {
+                out.push_str(rem);
+                self.hold.clear();
+            }
+        }
+        out
+    }
+
+    /// Process one complete line. Returns true when it should be shown.
+    fn feed_line(&mut self, line: &str) -> bool {
+        let t = line.trim_end();
+        if self.in_block {
+            if !self.saw_kind {
+                if !t.trim().is_empty() {
+                    self.is_write = t.trim() == "WRITE_FILE";
+                    self.saw_kind = true;
+                }
+            } else if self.is_write {
+                if t == "content:" {
+                    self.in_content = true;
+                } else if t == "END_OF_CONTENT" {
+                    self.seen_eoc = true;
+                }
+            }
+            if t == "```" && (!self.is_write || !self.in_content || self.seen_eoc) {
+                self.in_block = false;
+            }
+            false
+        } else if t == "```tool" {
+            self.in_block = true;
+            self.saw_kind = false;
+            self.is_write = false;
+            self.in_content = false;
+            self.seen_eoc = false;
+            false
+        } else {
+            true
+        }
+    }
+
+    /// End of a model message: emit any held partial line and reset.
+    pub fn flush(&mut self) -> String {
+        let mut out = String::new();
+        if !self.hold.is_empty() {
+            let line = std::mem::take(&mut self.hold);
+            let line = line.trim_end_matches(['\n', '\r']);
+            if self.feed_line(line) {
+                out.push_str(line);
+            }
+        }
+        self.in_block = false;
+        out
+    }
+}
+
 pub struct Ui {
     pub color: bool,
     pub width: usize,
     stream: Mutex<WordWrapper>,
+    filter: Mutex<ToolBlockFilter>,
     spinner: Mutex<Option<Spinner>>,
 }
 
@@ -49,6 +154,7 @@ impl Ui {
             color,
             width,
             stream: Mutex::new(WordWrapper::new(width)),
+            filter: Mutex::new(ToolBlockFilter::new()),
             spinner: Mutex::new(None),
         }
     }
@@ -113,23 +219,24 @@ impl Ui {
         }
     }
 
-    /// Streamed model text: fragments arrive over time; complete wrapped
-    /// lines are printed as soon as they are ready.
+    /// Streamed model text: fragments arrive over time; tool blocks are
+    /// hidden, complete wrapped prose lines are printed as they are ready.
     pub fn delta(&self, text: &str) {
         self.touch();
-        let mut lines: Vec<String> = Vec::new();
-        {
-            let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
-            let mut collect = |l: &str| lines.push(l.to_string());
-            stream.push(text, &mut collect);
-        }
-        for l in lines {
-            println!("{l}");
-        }
+        let visible = {
+            let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
+            filter.push(text)
+        };
+        self.push_visible(&visible);
     }
 
-    /// Flush the tail of the streamed reply (end of turn).
+    /// Flush the tail of the streamed reply (end of message/turn).
     pub fn stream_flush(&self) {
+        let tail = {
+            let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
+            filter.flush()
+        };
+        self.push_visible(&tail);
         let mut lines: Vec<String> = Vec::new();
         {
             let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
@@ -141,6 +248,22 @@ impl Ui {
             for l in lines {
                 println!("{l}");
             }
+        }
+    }
+
+    fn push_visible(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.touch();
+        let mut lines: Vec<String> = Vec::new();
+        {
+            let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
+            let mut collect = |l: &str| lines.push(l.to_string());
+            stream.push(text, &mut collect);
+        }
+        for l in lines {
+            println!("{l}");
         }
     }
 
@@ -170,12 +293,17 @@ impl Ui {
         flush();
     }
 
+    /// One narrated tool action. Also a message boundary: anything the
+    /// stream pipeline still holds is flushed first (prevents fragments
+    /// of one model message gluing onto the next).
     pub fn action(&self, label: &str) {
+        self.stream_flush();
         self.touch();
         self.line_colored(MAGENTA, &format!("tool: {label}"));
     }
 
     pub fn tool_ok(&self, body: &str) {
+        self.stream_flush();
         self.touch();
         for line in body.lines().take(12) {
             self.line_colored(DIM, &format!("| {line}"));
@@ -183,6 +311,7 @@ impl Ui {
     }
 
     pub fn tool_err(&self, body: &str) {
+        self.stream_flush();
         self.touch();
         for line in body.lines().take(12) {
             self.line_colored(RED, &format!("| {line}"));
@@ -190,6 +319,7 @@ impl Ui {
     }
 
     pub fn info(&self, text: &str) {
+        self.stream_flush();
         self.touch();
         self.line_colored(YELLOW, text);
     }
@@ -217,15 +347,11 @@ impl Ui {
     }
 
     /// Confirmation dialog for file writes/edits. Returns true to approve.
-    pub fn confirm(&self, verb: &str, path: &str, preview: &str, is_new: bool) -> bool {
+    pub fn confirm(&self, _verb: &str, path: &str, preview: &str, is_new: bool) -> bool {
+        self.stream_flush();
         self.spinner_off();
         let kind = if is_new { "create file" } else { "modify file" };
-        println!(
-            "\n{} {} -> {}",
-            self.paint(BOLD, kind),
-            self.paint(CYAN, verb),
-            self.paint(CYAN, path)
-        );
+        println!("\n{} -> {}", self.paint(BOLD, kind), self.paint(CYAN, path));
         for line in preview.lines().take(60) {
             let colored = if line.starts_with('+') {
                 self.paint(GREEN, line)
@@ -536,4 +662,67 @@ fn set_console_font(name: &str) -> bool {
 #[cfg(not(windows))]
 fn set_console_font(_name: &str) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_hides_tool_blocks_shows_prose() {
+        let mut f = ToolBlockFilter::new();
+        let out = f.push("before\n```tool\nLIST_DIR\npath: src\n```\nafter\n");
+        assert_eq!(out, "before\nafter\n");
+    }
+
+    #[test]
+    fn filter_survives_fences_split_across_chunks() {
+        let mut f = ToolBlockFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.push("hi\n``"));
+        out.push_str(&f.push("`tool\nREAD_FILE\npath: a\n``"));
+        out.push_str(&f.push("`\nbye"));
+        out.push_str(&f.flush());
+        assert_eq!(out, "hi\nbye");
+    }
+
+    #[test]
+    fn filter_write_content_inner_fences_stay_hidden() {
+        let mut f = ToolBlockFilter::new();
+        let out = f.push(
+            "```tool\nWRITE_FILE\npath: a.md\ncontent:\nline1\n```\nnot real fence\nEND_OF_CONTENT\n```\nprose\n",
+        );
+        assert_eq!(out, "prose\n");
+    }
+
+    #[test]
+    fn filter_streams_prose_before_fence_decided() {
+        let mut f = ToolBlockFilter::new();
+        // a partial non-fence line is emitted immediately (stream liveness)
+        let out = f.push("hello wo");
+        assert_eq!(out, "hello wo");
+        // but a partial that could grow into a fence is held
+        let out = f.push("rld\n``");
+        assert_eq!(out, "rld\n");
+        // "```" alone is not a tool fence -> it is shown (prose/code block)
+        let out = f.push("`\nrest");
+        assert_eq!(out, "```\nrest");
+    }
+
+    #[test]
+    fn filter_flush_resets_block_state() {
+        let mut f = ToolBlockFilter::new();
+        let mut out = f.push("```tool\nLIST_DIR\npath: .\n"); // unterminated block
+        out.push_str(&f.flush()); // message ended mid-block: drop the rest
+        assert_eq!(out, "");
+        // next message starts clean
+        assert_eq!(f.push("prose\n"), "prose\n");
+    }
+
+    #[test]
+    fn filter_plain_fences_are_not_hidden() {
+        let mut f = ToolBlockFilter::new();
+        let out = f.push("look:\n```rust\nfn main() {}\n```\nend\n");
+        assert_eq!(out, "look:\n```rust\nfn main() {}\n```\nend\n");
+    }
 }

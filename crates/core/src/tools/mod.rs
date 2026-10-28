@@ -30,6 +30,9 @@ pub struct ToolOutput {
     pub path: String,
     pub body: String,
     pub is_error: bool,
+    /// True when the tool actually mutated the filesystem (used by the
+    /// session's duplicate-action loop breaker).
+    pub changed: bool,
 }
 
 impl ToolOutput {
@@ -143,17 +146,23 @@ impl ToolKit {
             Action::ListDir { path } => self.list_dir(path).map_err(err_string),
         };
         match result {
-            Ok(body) => ToolOutput {
-                verb,
-                path,
-                body,
-                is_error: false,
-            },
+            Ok(body) => {
+                let changed = matches!(action, Action::WriteFile { .. } | Action::EditFile { .. })
+                    && !body.contains("unchanged");
+                ToolOutput {
+                    verb,
+                    path,
+                    body,
+                    is_error: false,
+                    changed,
+                }
+            }
             Err(body) => ToolOutput {
                 verb,
                 path,
                 body,
                 is_error: true,
+                changed: false,
             },
         }
     }

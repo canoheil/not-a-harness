@@ -5,6 +5,7 @@ use crate::error::CoreError;
 use crate::protocol::{self, Action};
 use crate::provider::{ChatMessage, ChatOptions, ChatRequest, LlmProvider};
 use crate::tools::{ConfirmRequest, ToolKit, ToolOutput};
+use std::collections::HashMap;
 
 /// Events surfaced to the UI while a turn runs.
 pub enum Event<'a> {
@@ -90,6 +91,9 @@ impl<'a> Session<'a> {
         }
         self.history.push(ChatMessage::user(user_input));
 
+        // duplicate-call loop breaker state (per turn)
+        let mut action_counts: HashMap<String, usize> = HashMap::new();
+
         for _step in 0..self.config.max_steps {
             // compaction keeps old turns from eating the window
             if self.context.wants_compaction(&self.history) {
@@ -142,7 +146,38 @@ impl<'a> Session<'a> {
             let mut results = String::from("[TOOL RESULTS]");
             for action in &parsed.actions {
                 on_event(&Event::Action(action));
-                let output = self.tools.run(action, confirm);
+                // Loop breaker: local models sometimes get stuck repeating
+                // the same call. A repeat gets a hint; a third identical
+                // call is blocked so the turn cannot spin forever.
+                let sig = action_signature(action);
+                let n = *action_counts.get(&sig).unwrap_or(&0);
+                let output = if n >= 2 {
+                    ToolOutput {
+                        verb: action.verb(),
+                        path: action.path().to_string(),
+                        body: "duplicate call blocked: this exact action already ran twice \
+                               in this turn and had no further effect. Do the NEXT step, \
+                               or finish with a plain-text answer."
+                            .to_string(),
+                        is_error: true,
+                        changed: false,
+                    }
+                } else {
+                    let mut out = self.tools.run(action, confirm);
+                    if n == 1 {
+                        out.body = format!(
+                            "{}\n(this is a repeat of an earlier call - if the goal is \
+                             already achieved, move on to the next step or finish)",
+                            out.body.trim_end()
+                        );
+                    }
+                    if out.changed {
+                        // real state change: the loop breaker resets
+                        action_counts.clear();
+                    }
+                    out
+                };
+                *action_counts.entry(sig).or_insert(0) += 1;
                 // keep the file cache coherent
                 match action {
                     Action::ReadFile { .. } if !output.is_error => {}
@@ -162,6 +197,14 @@ impl<'a> Session<'a> {
         on_event(&Event::Info(
             "[warn] step limit reached — asking for a final answer".into(),
         ));
+        // Tell the model explicitly to stop calling tools - otherwise it
+        // answers with yet another tool block that nobody can run.
+        self.history.push(ChatMessage::user(
+            "[SYSTEM] Tool-call budget is exhausted. Do not request any tools. \
+             Reply now with a plain-text final answer for the user, summarizing \
+             what was done."
+                .to_string(),
+        ));
         let messages = self.context.build(
             &system_intro(&self.tools.root().display().to_string()),
             protocol::tool_protocol_doc(),
@@ -176,9 +219,40 @@ impl<'a> Session<'a> {
         let reply = self
             .provider
             .chat_stream(&req, &mut |delta| on_event(&Event::Delta(delta)))?;
+        if protocol::parse(&reply).prose.trim().is_empty() {
+            on_event(&Event::Info(
+                "[warn] the model produced no final answer text".into(),
+            ));
+        }
         self.history.push(ChatMessage::assistant(reply));
         on_event(&Event::TurnDone);
         Ok(())
+    }
+}
+
+/// Identity of an action for the duplicate-call loop breaker. Content
+/// hashes keep "write A, edit B, write A-back" distinct from loops.
+fn action_signature(action: &Action) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    fn h(s: &str) -> u64 {
+        let mut d = DefaultHasher::new();
+        s.hash(&mut d);
+        d.finish()
+    }
+    match action {
+        Action::ReadFile {
+            path,
+            offset,
+            limit,
+        } => format!("R:{path}:{offset:?}:{limit:?}"),
+        Action::WriteFile { path, content } => format!("W:{path}:{}", h(content)),
+        Action::EditFile {
+            path,
+            search,
+            replace,
+        } => format!("E:{path}:{}:{}", h(search), h(replace)),
+        Action::ListDir { path } => format!("L:{path}"),
     }
 }
 
@@ -299,7 +373,83 @@ mod tests {
         let mut s = session_with(replies, &dir);
         s.run_turn("go", &mut |_: &ConfirmRequest| true, &mut |_| {})
             .unwrap();
-        // history: user + (assistant+user)*steps + final assistant
-        assert!(s.history.len() <= 2 + 8 * 2 + 1);
+        // history: user + (assistant+user)*steps + [SYSTEM] user + final assistant
+        assert!(s.history.len() <= 2 + 8 * 2 + 2);
+    }
+
+    #[test]
+    fn duplicate_actions_get_a_note_then_are_blocked() {
+        let dir = std::env::temp_dir().join("nah_test_dup");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // model repeats the same LIST_DIR forever
+        let replies = vec!["```tool\nLIST_DIR\npath: .\n```".to_string(); 8];
+        let mut s = session_with(replies, &dir);
+        let mut notes = Vec::new();
+        let mut blocks = 0;
+        s.run_turn("go", &mut |_: &ConfirmRequest| true, &mut |ev| {
+            if let Event::ToolResult(o) = ev {
+                if o.body.contains("this is a repeat of an earlier call") {
+                    notes.push(());
+                }
+                if o.body.contains("duplicate call blocked") {
+                    blocks += 1;
+                }
+            }
+        })
+        .unwrap();
+        // 2nd identical call gets a note, 3rd+ are blocked
+        assert_eq!(notes.len(), 1, "exactly one repeat-note expected");
+        assert!(blocks >= 1, "duplicates must be blocked");
+    }
+
+    #[test]
+    fn real_changes_reset_the_loop_breaker() {
+        let dir = std::env::temp_dir().join("nah_test_dup_reset");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // write a, write b, write a again - content differs so these are
+        // three distinct signatures; a real change must also reset counts
+        let replies = vec![
+            "```tool\nWRITE_FILE\npath: a.txt\ncontent:\n1\nEND_OF_CONTENT\n```".to_string(),
+            "```tool\nWRITE_FILE\npath: a.txt\ncontent:\n2\nEND_OF_CONTENT\n```".to_string(),
+            "```tool\nWRITE_FILE\npath: a.txt\ncontent:\n1\nEND_OF_CONTENT\n```".to_string(),
+            "done".to_string(),
+        ];
+        let mut s = session_with(replies, &dir);
+        let mut blocked = 0;
+        let mut notes = 0;
+        s.run_turn("go", &mut |_: &ConfirmRequest| true, &mut |ev| {
+            if let Event::ToolResult(o) = ev {
+                if o.body.contains("duplicate call blocked") {
+                    blocked += 1;
+                }
+                if o.body.contains("this is a repeat of an earlier call") {
+                    notes += 1;
+                }
+            }
+        })
+        .unwrap();
+        assert_eq!(blocked, 0, "distinct writes must never be blocked");
+        assert_eq!(notes, 0, "distinct writes must never be flagged");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "1\n");
+    }
+
+    #[test]
+    fn final_answer_is_requested_without_tools() {
+        let dir = std::env::temp_dir().join("nah_test_final");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // model only ever asks for tools
+        let replies = vec!["```tool\nLIST_DIR\npath: .\n```".to_string(); 10];
+        let mut s = session_with(replies, &dir);
+        s.run_turn("go", &mut |_: &ConfirmRequest| true, &mut |_| {})
+            .unwrap();
+        // the model must have been told to stop calling tools
+        let told = s.history.iter().any(|m| {
+            matches!(m.role, crate::provider::Role::User)
+                && m.content.contains("Tool-call budget is exhausted")
+        });
+        assert!(told, "final-answer instruction missing from history");
     }
 }
