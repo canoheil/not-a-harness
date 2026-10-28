@@ -40,10 +40,11 @@ impl Default for SessionConfig {
 
 pub fn system_intro(root: &str) -> String {
     format!(
-        "You are `nah`, a careful coding agent working inside a project.\n\
-         Project root: {root}\n\
-         You read and edit files with the text tool protocol described below.\n\
-         Be concise and practical. Prefer EDIT_FILE over rewriting whole files."
+        "You are `nah`, a coding agent working inside a project directory.\n\
+         Project root: {root}\n\n\
+         You can only read and change files through the tools below. Work step\n\
+         by step: look at what exists, change one thing at a time, check the\n\
+         result, and continue until the task is complete."
     )
 }
 
@@ -320,8 +321,13 @@ mod tests {
     fn system_prompt_does_not_force_a_language() {
         // The system prompt must not name or force any language; models
         // mirror the user's language naturally. Forcing one makes the model
-        // answer e.g. Persian to English input.
-        let s = system_intro("/tmp/project");
+        // answer e.g. Persian to English input. Covers the full prompt:
+        // intro + tool doc (incl. the worked example).
+        let s = format!(
+            "{}\n\n{}",
+            system_intro("/tmp/project"),
+            crate::protocol::tool_protocol_doc()
+        );
         let lower = s.to_lowercase();
         assert!(!lower.contains("persian"), "language forced: {s}");
         assert!(!lower.contains("arabic"), "language forced: {s}");
