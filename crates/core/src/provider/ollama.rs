@@ -107,6 +107,13 @@ impl LlmProvider for OllamaProvider {
         let body = payload.to_string();
 
         let (status, lines) = http::post_json_stream(&format!("{}/api/chat", self.base), &body)?;
+        if status == 404 {
+            return Err(CoreError::Provider(
+                "the server has no /api/chat - if this is llama.cpp, LM Studio or vLLM, \
+                 use provider 'openai' instead (nah --setup)"
+                    .to_string(),
+            ));
+        }
         if status != 200 {
             return Err(CoreError::Provider(format!(
                 "/api/chat returned HTTP {status}"

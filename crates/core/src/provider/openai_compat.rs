@@ -74,6 +74,13 @@ impl LlmProvider for OpenAiCompatProvider {
 
         let (status, lines) =
             http::post_json_stream(&format!("{}/v1/chat/completions", self.base), &body)?;
+        if status == 404 {
+            return Err(CoreError::Provider(
+                "the server has no /v1/chat/completions - if this is Ollama, \
+                 use provider 'ollama' instead (nah --setup)"
+                    .to_string(),
+            ));
+        }
         if status != 200 {
             return Err(CoreError::Provider(format!(
                 "/v1/chat/completions returned HTTP {status}"

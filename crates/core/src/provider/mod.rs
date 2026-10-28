@@ -118,4 +118,11 @@ impl ProviderKind {
             _ => None,
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderKind::Ollama => "ollama",
+            ProviderKind::OpenAiCompat => "openai",
+        }
+    }
 }

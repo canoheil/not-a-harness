@@ -1,19 +1,19 @@
 //! The interactive REPL: line input, slash commands, session wiring.
 //!
 //! v1 reads lines through the console's own line editor (canonical mode):
-//! the terminal emulator renders the echo with proper BiDi — the safest
-//! possible RTL story. A fancier in-process editor (history, completion)
-//! can be layered on later without touching the core.
+//! the terminal emulator renders the echo with proper BiDi, so Persian /
+//! Arabic input displays correctly without any in-process text shaping.
 
 use std::io::BufRead;
 
 use nah_core::config::NahConfig;
 use nah_core::context::ContextManager;
 use nah_core::error::CoreError;
-use nah_core::provider::{self, LlmProvider};
+use nah_core::provider::LlmProvider;
 use nah_core::session::{Event, Session, SessionConfig};
 use nah_core::tools::{ConfirmRequest, ToolKit};
 
+use crate::setup;
 use crate::ui::Ui;
 
 pub struct Repl<'a> {
@@ -49,7 +49,7 @@ impl<'a> Repl<'a> {
     pub fn run(&mut self) -> Result<(), CoreError> {
         self.ui.banner();
         self.ui.info(&format!(
-            "مدل: {} · سرور: {} · کانتکست: {} توکن",
+            "model: {} | server: {} | ctx: {} tokens",
             self.config.model, self.config.url, self.config.ctx_tokens
         ));
         println!();
@@ -69,7 +69,7 @@ impl<'a> Repl<'a> {
             }
 
             if let Some(cmd) = trimmed.strip_prefix('/') {
-                if self.handle_command(cmd.trim())? {
+                if self.handle_command(cmd.trim()) {
                     break;
                 }
                 continue;
@@ -77,12 +77,11 @@ impl<'a> Repl<'a> {
 
             self.run_turn(trimmed);
         }
-        self.ui.info("خداحافظ! 👋");
+        self.ui.info("bye.");
         Ok(())
     }
 
     fn run_turn(&mut self, input: &str) {
-        self.ui.user_echo(input);
         println!();
 
         let mut confirm_fn = |req: &ConfirmRequest| -> bool {
@@ -118,47 +117,55 @@ impl<'a> Repl<'a> {
         }
     }
 
-    /// Returns Ok(true) when the REPL should exit.
-    fn handle_command(&mut self, cmd: &str) -> Result<bool, CoreError> {
+    /// Returns `true` when the REPL should exit. Never fails: command
+    /// errors are printed and the session keeps running.
+    fn handle_command(&mut self, cmd: &str) -> bool {
         let (name, rest) = match cmd.split_once(' ') {
             Some((n, r)) => (n, r.trim()),
             None => (cmd, ""),
         };
         match name {
-            "exit" | "quit" | "q" => return Ok(true),
+            "exit" | "quit" | "q" => return true,
             "help" | "h" | "?" => {
                 println!(
-                    r#"دستورها:
-  /models           نمایش مدل‌های موجود روی سرور
-  /model <name>     تعویض مدل
-  /ctx <n>          تنظیم بودجه‌ی کانتکست (و num_ctx)
-  /history <n>      تعداد پیام‌های پایانی همیشگی
-  /files            فایل‌های موجود در working set
-  /root             نمایش ریشه‌ی پروژه
-  /yes  | /no       تأیید خودکار نوشتن فایل روشن/خاموش
-  /reset            پاک کردن تاریخچه و حافظه‌ی جلسه
-  /status           وضعیت فعلی
-  /exit             خروج
-  (هر متن دیگری مستقیماً برای مدل فرستاده می‌شود)"#
+                    r#"commands:
+  /setup            run the setup wizard (provider, URL, default model)
+  /models           list models available on the server
+  /model <name>     switch the model
+  /ctx <n>          set the context budget (and num_ctx)
+  /history <n>      number of trailing messages always kept
+  /files            show files in the working set
+  /root             show the project root
+  /yes | /no        toggle auto-approve for file writes
+  /reset            clear conversation history and session memory
+  /status           show current settings
+  /exit             quit
+  (anything else is sent to the model as-is)"#
                 );
             }
-            "models" => {
-                let models = self
-                    .session
-                    .provider
-                    .list_models()
-                    .map_err(|e| CoreError::Provider(e.to_string()))?;
-                let pairs: Vec<(String, String)> =
-                    models.into_iter().map(|m| (m.name, m.detail)).collect();
-                self.ui.models(&pairs);
+            "setup" => {
+                if let Err(e) = setup::run(&self.ui, &mut self.config) {
+                    self.ui.error(&e.to_string());
+                } else {
+                    self.sync_session_config();
+                }
             }
+            "models" => match self.session.provider.list_models() {
+                Ok(models) => {
+                    let pairs: Vec<(String, String)> =
+                        models.into_iter().map(|m| (m.name, m.detail)).collect();
+                    self.ui.models(&pairs);
+                }
+                Err(e) => self.ui.error(&e.to_string()),
+            },
             "model" => {
                 if rest.is_empty() {
-                    self.ui.info(&format!("مدل فعلی: {}", self.config.model));
+                    self.ui
+                        .info(&format!("current model: {}", self.config.model));
                 } else {
                     self.config.model = rest.to_string();
                     self.session.config.model = rest.to_string();
-                    self.ui.ok(&format!("مدل روی {rest} تنظیم شد."));
+                    self.ui.ok(&format!("model set to {rest}"));
                 }
             }
             "ctx" => {
@@ -166,64 +173,78 @@ impl<'a> Repl<'a> {
                     self.config.ctx_tokens = n;
                     self.session.config.options.num_ctx = n as u32;
                     self.session.context.config.ctx_tokens = n;
-                    self.ui.ok(&format!("بودجه‌ی کانتکست: {n} توکن"));
+                    self.ui.ok(&format!("context budget: {n} tokens"));
                 } else {
-                    self.ui
-                        .info(&format!("کانتکست فعلی: {} توکن", self.config.ctx_tokens));
+                    self.ui.info(&format!(
+                        "current context budget: {} tokens",
+                        self.config.ctx_tokens
+                    ));
                 }
             }
             "history" => {
                 if let Ok(n) = rest.parse::<usize>() {
                     self.config.history_messages = n;
                     self.session.context.config.history_messages = n;
-                    self.ui.ok(&format!("پنجره‌ی تاریخچه: {n} پیام"));
+                    self.ui.ok(&format!("history window: {n} messages"));
+                } else {
+                    self.ui.info(&format!(
+                        "current history window: {} messages",
+                        self.config.history_messages
+                    ));
                 }
             }
             "files" => {
                 let files = self.session.context.open_files();
                 if files.is_empty() {
-                    self.ui.info("فعلاً فایلی در حافظه نیست.");
+                    self.ui.info("no files in the working set yet.");
                 } else {
                     for f in files {
-                        println!("  • {} ({} خط)", f.path, f.content.lines().count());
+                        println!("  - {} ({} lines)", f.path, f.content.lines().count());
                     }
                 }
             }
             "root" => {
                 self.ui.info(&format!(
-                    "ریشه‌ی پروژه: {}",
+                    "project root: {}",
                     self.session.tools.root().display()
                 ));
             }
             "yes" => {
                 self.config.auto_approve = true;
-                self.ui.ok("تأیید خودکار فایل‌ها روشن شد.");
+                self.ui.ok("file writes will be auto-approved.");
             }
             "no" => {
                 self.config.auto_approve = false;
-                self.ui.ok("تأیید خودکار فایل‌ها خاموش شد.");
+                self.ui.ok("file writes now require confirmation.");
             }
             "reset" => {
                 self.session.reset();
-                self.ui.ok("جلسه پاک شد.");
+                self.ui.ok("session cleared.");
             }
             "status" => {
                 println!(
-                    "  مدل: {} · سرور: {} · provider: {:?}\n  کانتکست: {} · تاریخچه: {} پیام · تأیید خودکار: {}",
+                    "  model: {} | server: {} | provider: {}\n  ctx: {} | history: {} | auto-approve: {}",
                     self.config.model,
                     self.config.url,
-                    self.config.provider,
+                    self.config.provider.as_str(),
                     self.config.ctx_tokens,
                     self.config.history_messages,
-                    if self.config.auto_approve { "روشن" } else { "خاموش" }
+                    if self.config.auto_approve { "on" } else { "off" }
                 );
             }
             other => {
                 self.ui
-                    .error(&format!("دستور ناشناخته: /{other} — برای راهنما /help"));
+                    .error(&format!("unknown command: /{other} - type /help"));
             }
         }
-        Ok(false)
+        false
+    }
+
+    /// Push config changes (from the wizard) into the live session.
+    fn sync_session_config(&mut self) {
+        self.session.config.model = self.config.model.clone();
+        self.session.config.options = self.config.chat_options();
+        self.session.context.config = self.config.context_config();
     }
 }
 
@@ -274,12 +295,4 @@ pub fn run_oneshot(
     };
     session.run_turn(prompt, &mut confirm_fn, &mut on_event)?;
     Ok(())
-}
-
-/// Keep the import used in every build.
-pub fn _provider_connect(
-    kind: provider::ProviderKind,
-    url: &str,
-) -> Result<Box<dyn LlmProvider>, CoreError> {
-    provider::connect(kind, url)
 }

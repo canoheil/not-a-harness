@@ -1,10 +1,10 @@
 # nah — not-a-harness 🐎
 
-**هارنس سبک و سریع مدل‌های لوکال — با پروتکل ابزارِ متنی (نه JSON)، پشتیبانی RTL، و صفر وابستگی.**
+**هارنس سبک و سریع مدل‌های لوکال — با پروتکل ابزارِ متنی (نه JSON)، پشتیبانی RTL برای محتوای فارسی، و صفر وابستگی.**
 
 `nah` یک ایجنت کدنویس است که به مدل لوکال شما (از طریق Ollama یا هر سرور سازگار با OpenAI مثل llama.cpp / LM Studio) وصل می‌شود، فایل‌ها را می‌خواند و می‌نویسد، و با یک پروتکل **متنی ساده** با مدل ارتباط برقرار می‌کند — چون مدل‌های کوچیک (مثل Qwen2.5-Coder) توی JSON گم می‌شوند.
 
-> **English summary:** `nah` is a lean, dependency-free (std-only Rust) coding-agent harness for local LLMs. Instead of JSON tool-calling, models emit simple fenced `tool` blocks (`READ_FILE`, `WRITE_FILE`, `EDIT_FILE`, `LIST_DIR`) that are parsed by a line-oriented state machine. It keeps prompts inside a fixed token budget (working set of files + rolling summary), gates every file write behind a confirmation diff, and ships an RTL-friendly Persian terminal UI. Phase 2 adds a Tauri GUI. MIT licensed.
+> **English summary:** `nah` is a lean, dependency-free (std-only Rust) coding-agent harness for local LLMs. Instead of JSON tool-calling, models emit simple fenced `tool` blocks (`READ_FILE`, `WRITE_FILE`, `EDIT_FILE`, `LIST_DIR`) that are parsed by a line-oriented state machine. It keeps prompts inside a fixed token budget (working set of files + rolling summary), gates every file write behind a confirmation diff, and ships an English (Claude-Code style) terminal UI with correct RTL rendering for Persian/Arabic content. A first-run setup wizard configures the provider and default model. Phase 2 adds a Tauri GUI. MIT licensed.
 
 ---
 
@@ -16,7 +16,8 @@
 | 🗣 **پروتکل ابزار متنی** | مدل به‌جای JSON، بلاک‌های ساده می‌نویسه. برای مدل‌های 7B بسیار قابل‌اعتمادتر. |
 | 🎯 **مدیریت کانتکست** | با بودجه‌ی ثابت token کار میکنه: آخرین N پیام + فایل‌های باز + خلاصه‌ی چرخشی. با 4K هم میشه کد نوشت. |
 | 🔒 **ایمنی فایل** | هر نوشتن/ویرایشی diff برمیگردونه و تأیید میخواد. مسیرهای `..` و absolute بلاک میشن. |
-| 🌴 **RTL / فارسی** | متن فارسی بدون دستکاری (logical order) به ترمینال میره — Windows Terminal و ترمینال‌های مدرن درست رسمش میکنن. |
+| 🌴 **RTL / فارسی** | رابط کاربری انگلیسی (سبک Claude Code)؛ محتوای فارسی (ورودی شما و خروجی مدل) بدون دستکاری (logical order) به ترمینال میره و درست رسم میشه. |
+| ⚙️ **ستاپ اولیه** | بار اول یک ویزارد کوتاه provider و آدرس سرور و مدل پیش‌فرض رو تنظیم میکنه (`nah --setup` یا `/setup`). |
 | 🤖 **سازگار با Qwen2.5-Coder** | با Ollama و llama.cpp تست شده؛ پرامپت فشرده و دقیق برای مدل‌های کوچیک. |
 
 ## 🚀 شروع سریع
@@ -27,17 +28,24 @@ ollama pull qwen2.5-coder:7b
 
 # 2. بساز (نیاز به Rust — یا از باینری‌های GitHub Actions استفاده کن)
 cargo build --release
+
+# 3. اجرا کن — بار اول ویزارد ستاپ بالا میاد:
+#    انتخاب provider → آدرس سرور → تست اتصال → لیست مدل‌ها → انتخاب مدل پیش‌فرض
 ./target/release/nah
 
-# 3. یا مستقیم یک کار بده
+# 4. یا مستقیم یک کار بده
 nah -p "توی فایل src/main.rs یه تابع greet اضافه کن"
 ```
+
+هر وقت خواستی تنظیمات رو عوض کنی: `nah --setup` یا داخل برنامه `/setup` (و `/model` برای تعویض سریع مدل).
 
 با `--url` میتونی به هر سرور سازگار با OpenAI وصل بشی:
 
 ```bash
 nah --provider openai --url http://localhost:8080 --model qwen2.5-coder-14b
 ```
+
+> **نمایش فارسی/RTL:** رابط برنامه انگلیسی است؛ متن فارسی (تایپ شما و خروجی مدل) به‌صورت logical order به ترمینال میره و ترمینال اون رو درست رسم میکنه. اگر فارسی به‌صورت `?` یا مربع دیده شد، مشکل از **فونت ترمینال** است — توی Windows Terminal یا VS Code یک فونت دارای گلیف فارسی انتخاب کنید (مثل Vazirmatn Mono یا DejaVu Sans Mono).
 
 ## 🛠 پروتکل ابزار (بخش جادویی)
 
