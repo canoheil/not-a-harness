@@ -26,6 +26,7 @@ pub struct NahConfig {
     pub auto_compact: bool,
     pub auto_approve: bool,
     pub color: bool,
+    pub width: Option<usize>,
 }
 
 impl Default for NahConfig {
@@ -44,6 +45,7 @@ impl Default for NahConfig {
             auto_compact: true,
             auto_approve: false,
             color: true,
+            width: None,
         }
     }
 }
@@ -86,6 +88,7 @@ Options:
   --yes                  auto-approve file writes/edits
   --no-color             disable colors
   --no-compact           disable automatic history summarization
+  --width <n>            override terminal width for text wrapping
   --version              print version
   --help                 show this help
 
@@ -273,6 +276,13 @@ pub fn from_args(args: &[String]) -> Result<Option<NahConfig>, CoreError> {
             "--yes" | "-y" => cfg.auto_approve = true,
             "--no-color" => cfg.color = false,
             "--no-compact" => cfg.auto_compact = false,
+            "--width" => {
+                cfg.width = Some(
+                    take_value("--width")?
+                        .parse()
+                        .map_err(|_| CoreError::Config("--width must be a number".into()))?,
+                );
+            }
             other => {
                 return Err(CoreError::Config(format!(
                     "unknown option '{other}' (try --help)"

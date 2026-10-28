@@ -2,7 +2,9 @@
 
 mod repl;
 mod setup;
+mod spinner;
 mod ui;
+mod wrap;
 
 use std::io::IsTerminal;
 
@@ -44,7 +46,7 @@ fn main() {
         }
     };
 
-    let ui = Ui::new(cfg.color);
+    let ui = Ui::new(cfg.color, cfg.width);
     let mut cfg = cfg;
 
     // first-run setup: no config yet and the user is in an interactive terminal

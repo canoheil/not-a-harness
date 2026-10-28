@@ -88,6 +88,8 @@ impl<'a> Repl<'a> {
 
     fn run_turn(&mut self, input: &str) {
         println!();
+        self.ui.divider();
+        self.ui.spinner_on();
 
         let mut confirm_fn = |req: &ConfirmRequest| -> bool {
             self.ui
@@ -112,12 +114,16 @@ impl<'a> Repl<'a> {
                 ui.info(msg);
             }
             Event::TurnDone => {
+                ui.stream_flush();
+                ui.spinner_off();
                 println!();
                 println!();
             }
         };
 
         if let Err(e) = self.session.run_turn(input, &mut confirm_fn, &mut on_event) {
+            self.ui.spinner_off();
+            self.ui.stream_flush();
             self.ui.error(&e.to_string());
         }
     }
@@ -282,6 +288,7 @@ pub fn run_oneshot(
     );
 
     let auto = config.auto_approve;
+    ui.spinner_on();
     let mut confirm_fn = |req: &ConfirmRequest| -> bool {
         if auto {
             return true;
@@ -305,8 +312,15 @@ pub fn run_oneshot(
             println!();
             ui.info(msg);
         }
-        Event::TurnDone => println!(),
+        Event::TurnDone => {
+            ui.stream_flush();
+            ui.spinner_off();
+            println!();
+        }
     };
-    session.run_turn(prompt, &mut confirm_fn, &mut on_event)?;
+    let result = session.run_turn(prompt, &mut confirm_fn, &mut on_event);
+    ui.spinner_off();
+    ui.stream_flush();
+    result?;
     Ok(())
 }

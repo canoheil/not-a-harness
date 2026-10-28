@@ -1,19 +1,32 @@
-//! Terminal presentation: ANSI colors, English UI, Windows console setup.
+//! Terminal presentation: ANSI colors, English UI, RTL-safe rendering.
 //!
-//! The interface is English (Claude-Code style). Persian/Arabic appears only
-//! as *content* (user input, model output, files) and is passed through in
-//! Unicode logical order - the terminal emulator does the BiDi rendering.
+//! The interface is English (Claude-Code style). Persian/Arabic appears
+//! only as *content* (user input, model output, files). Two techniques keep
+//! it display-clean in any modern terminal:
 //!
-//! Windows note: classic conhost has no per-glyph font fallback, so if the
-//! console font lacks Persian/Arabic glyphs, ALL RTL text (including the
-//! terminal's own echo of typed input) shows as boxes. We detect this via
-//! GDI glyph lookup and offer to switch the console font, or point the
-//! user to Windows Terminal which falls back to system fonts automatically.
+//! 1. We wrap every printed line at word boundaries ourselves (see
+//!    `wrap.rs`) so the terminal never splits RTL paragraphs mid-flow -
+//!    each line we emit is one clean BiDi segment, top-down in logical
+//!    order, exactly like polished TUIs do.
+//! 2. Text is passed through in Unicode logical order; the terminal does
+//!    the BiDi reordering and Arabic shaping at render time.
+//!
+//! Windows: we enable VT processing and UTF-8 (CP65001). In classic
+//! conhost (no font fallback) a font without Persian glyphs shows RTL as
+//! boxes - we detect that and offer a font switch. Windows Terminal does
+//! its own font fallback, so the warning is skipped there.
 
 use std::io::Write;
+use std::sync::Mutex;
+
+use crate::spinner::Spinner;
+use crate::wrap::{terminal_width, wrap_line, WordWrapper};
 
 pub struct Ui {
     pub color: bool,
+    pub width: usize,
+    stream: Mutex<WordWrapper>,
+    spinner: Mutex<Option<Spinner>>,
 }
 
 const RESET: &str = "\x1b[0m";
@@ -27,11 +40,17 @@ const MAGENTA: &str = "\x1b[35m";
 const CYAN: &str = "\x1b[36m";
 
 impl Ui {
-    pub fn new(color: bool) -> Ui {
+    pub fn new(color: bool, width: Option<usize>) -> Ui {
         if color {
             setup_windows_console();
         }
-        Ui { color }
+        let width = terminal_width(width);
+        Ui {
+            color,
+            width,
+            stream: Mutex::new(WordWrapper::new(width)),
+            spinner: Mutex::new(None),
+        }
     }
 
     fn paint(&self, code: &str, text: &str) -> String {
@@ -42,74 +61,164 @@ impl Ui {
         }
     }
 
+    // ------------------------------------------------------------------
+    // spinner control
+    // ------------------------------------------------------------------
+
+    /// Start (or restart) the activity spinner for a model turn.
+    pub fn spinner_on(&self) {
+        let mut slot = self.spinner.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(Spinner::start(self.color));
+        }
+    }
+
+    /// Stop the spinner and leave the line clean.
+    pub fn spinner_off(&self) {
+        let mut slot = self.spinner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = slot.take() {
+            s.stop();
+        }
+    }
+
+    /// Record output activity (erases the spinner frame).
+    fn touch(&self) {
+        let slot = self.spinner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = slot.as_ref() {
+            s.activity();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // printing (everything goes through word-wrap)
+    // ------------------------------------------------------------------
+
+    /// Print one complete logical line, wrapped to the terminal width.
+    pub fn line(&self, text: &str) {
+        self.touch();
+        for l in wrap_line(text, self.width) {
+            println!("{l}");
+        }
+    }
+
+    /// Print one pre-colored logical line (color codes excluded from wrap).
+    pub fn line_colored(&self, code: &str, text: &str) {
+        self.touch();
+        if self.color {
+            for l in wrap_line(text, self.width) {
+                println!("{code}{l}{RESET}");
+            }
+        } else {
+            self.line(text);
+        }
+    }
+
+    /// Streamed model text: fragments arrive over time; complete wrapped
+    /// lines are printed as soon as they are ready.
+    pub fn delta(&self, text: &str) {
+        self.touch();
+        let mut lines: Vec<String> = Vec::new();
+        {
+            let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
+            let mut collect = |l: &str| lines.push(l.to_string());
+            stream.push(text, &mut collect);
+        }
+        for l in lines {
+            println!("{l}");
+        }
+    }
+
+    /// Flush the tail of the streamed reply (end of turn).
+    pub fn stream_flush(&self) {
+        let mut lines: Vec<String> = Vec::new();
+        {
+            let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
+            let mut collect = |l: &str| lines.push(l.to_string());
+            stream.flush(&mut collect);
+        }
+        if !lines.is_empty() {
+            self.touch();
+            for l in lines {
+                println!("{l}");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // UI chrome
+    // ------------------------------------------------------------------
+
     pub fn banner(&self) {
-        println!("{}", self.paint(BLUE, "nah - not-a-harness"));
         println!(
             "{}",
-            self.paint(DIM, "lean local-LLM agent harness - text tool protocol")
+            self.paint(BLUE, &format!("{}{}", BOLD, "nah - not-a-harness"))
         );
-        println!(
-            "{}\n",
-            self.paint(DIM, "type /help for commands, /exit to quit")
-        );
+        self.line_colored(DIM, "lean local-LLM agent harness - text tool protocol");
+        self.line_colored(DIM, "type /help for commands, /exit to quit");
+        println!();
+    }
+
+    pub fn divider(&self) {
+        self.touch();
+        let line = "─".repeat(self.width.min(60));
+        println!("{}", self.paint(DIM, &line));
     }
 
     pub fn prompt(&self) {
+        self.touch();
         print!("{} ", self.paint(CYAN, ">"));
         flush();
     }
 
-    pub fn delta(&self, text: &str) {
-        // streamed model text - printed as-is so RTL content flows naturally
-        print!("{text}");
-        flush();
-    }
-
     pub fn action(&self, label: &str) {
-        println!(
-            "{} {}",
-            self.paint(MAGENTA, "tool:"),
-            self.paint(DIM, label)
-        );
+        self.touch();
+        self.line_colored(MAGENTA, &format!("tool: {label}"));
     }
 
     pub fn tool_ok(&self, body: &str) {
+        self.touch();
         for line in body.lines().take(12) {
-            println!("  {} {}", self.paint(DIM, "|"), self.paint(DIM, line));
+            self.line_colored(DIM, &format!("| {line}"));
         }
     }
 
     pub fn tool_err(&self, body: &str) {
+        self.touch();
         for line in body.lines().take(12) {
-            println!("  {} {}", self.paint(RED, "|"), self.paint(RED, line));
+            self.line_colored(RED, &format!("| {line}"));
         }
     }
 
     pub fn info(&self, text: &str) {
-        println!("{}", self.paint(YELLOW, text));
+        self.touch();
+        self.line_colored(YELLOW, text);
     }
 
     pub fn error(&self, text: &str) {
-        eprintln!("{} {}", self.paint(RED, "error:"), self.paint(RED, text));
+        self.touch();
+        self.stream_flush();
+        eprintln!("{}", self.paint(RED, &format!("error: {text}")));
     }
 
     pub fn ok(&self, text: &str) {
-        println!("{} {}", self.paint(GREEN, "ok:"), text);
+        self.touch();
+        self.line_colored(GREEN, &format!("ok: {text}"));
     }
 
-    /// Read a y/N answer from stdin.
+    /// Read a y/N answer from stdin (spinner is paused around the prompt).
     pub fn ask_yes_no(&self, question: &str) -> bool {
+        self.spinner_off();
         print!("{} ", self.paint(YELLOW, question));
         flush();
         let mut answer = String::new();
-        if std::io::stdin().read_line(&mut answer).is_err() {
-            return false;
-        }
-        matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        let ok = std::io::stdin().read_line(&mut answer).is_ok();
+        self.spinner_on();
+        ok && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
     }
 
     /// Confirmation dialog for file writes/edits. Returns true to approve.
     pub fn confirm(&self, verb: &str, path: &str, preview: &str, is_new: bool) -> bool {
+        self.spinner_off();
         let kind = if is_new { "create file" } else { "modify file" };
         println!(
             "\n{} {} -> {}",
@@ -137,19 +246,23 @@ impl Ui {
             self.info("no models found on the server.");
             return;
         }
-        println!("{}", self.paint(BOLD, "available models:"));
+        self.line_colored(BOLD, "available models:");
         for (name, detail) in models {
             if detail.is_empty() {
-                println!("  - {name}");
+                self.line(&format!("  - {name}"));
             } else {
-                println!("  - {name}  {}", self.paint(DIM, detail));
+                self.line_colored(DIM, &format!("  - {name}  ({detail})"));
             }
         }
     }
 
     /// Warn (and offer a fix) when the console font cannot render Persian.
-    /// No-op on other platforms and when the font is fine.
+    /// Skipped in Windows Terminal (it does per-glyph font fallback) and on
+    /// other platforms. No-op when the font is fine.
     pub fn rtl_font_notice(&self) {
+        if in_windows_terminal() {
+            return; // font fallback makes RTL render fine here
+        }
         if rtl_glyphs_available() != Some(false) {
             return;
         }
@@ -158,13 +271,16 @@ impl Ui {
             None => "current console font".to_string(),
         };
         println!();
-        self.info(&format!(
-            "note: {font_desc} has no Persian/Arabic glyphs - RTL text shows as boxes."
-        ));
-        self.info(
+        self.line_colored(
+            YELLOW,
+            &format!("note: {font_desc} has no Persian/Arabic glyphs - RTL text shows as boxes."),
+        );
+        self.line_colored(
+            YELLOW,
             "      this also affects the terminal's own echo of typed input (not a nah bug).",
         );
-        self.info(
+        self.line_colored(
+            YELLOW,
             "      recommended: run nah inside Windows Terminal - it falls back to system fonts.",
         );
         if self.ask_yes_no("try switching this console's font to 'Segoe UI' now? [y/N]") {
@@ -181,6 +297,11 @@ impl Ui {
 
 pub fn flush() {
     let _ = std::io::stdout().flush();
+}
+
+/// True when running inside Windows Terminal (font fallback available).
+pub fn in_windows_terminal() -> bool {
+    std::env::var_os("WT_SESSION").is_some() || std::env::var_os("WT_PROFILE_ID").is_some()
 }
 
 // ---------------------------------------------------------------------------
