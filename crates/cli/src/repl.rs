@@ -48,6 +48,7 @@ impl<'a> Repl<'a> {
 
     pub fn run(&mut self) -> Result<(), CoreError> {
         self.ui.banner();
+        self.ui.rtl_font_notice();
         self.ui.info(&format!(
             "model: {} | server: {} | ctx: {} tokens",
             self.config.model, self.config.url, self.config.ctx_tokens

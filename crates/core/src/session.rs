@@ -42,7 +42,6 @@ pub fn system_intro(root: &str) -> String {
         "You are `nah`, a careful coding agent working inside a project.\n\
          Project root: {root}\n\
          You read and edit files with the text tool protocol described below.\n\
-         Answer in the same language the user writes in (Persian if they write Persian).\n\
          Be concise and practical. Prefer EDIT_FILE over rewriting whole files."
     )
 }
@@ -241,6 +240,22 @@ mod tests {
             ToolKit::new(dir.to_path_buf(), 64 * 1024),
             ContextManager::new(cfg),
         )
+    }
+
+    #[test]
+    fn system_prompt_does_not_force_a_language() {
+        // The system prompt must not name or force any language; models
+        // mirror the user's language naturally. Forcing one makes the model
+        // answer e.g. Persian to English input.
+        let s = system_intro("/tmp/project");
+        let lower = s.to_lowercase();
+        assert!(!lower.contains("persian"), "language forced: {s}");
+        assert!(!lower.contains("arabic"), "language forced: {s}");
+        assert!(
+            !lower.contains("language"),
+            "language directive present: {s}"
+        );
+        assert!(!s.contains("زبان"), "language forced: {s}");
     }
 
     #[test]
