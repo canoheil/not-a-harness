@@ -1,0 +1,13 @@
+[package]
+name = "nah-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "nah - a lean RTL-friendly terminal harness for local LLMs"
+
+[[bin]]
+name = "nah"
+path = "src/main.rs"
+
+[dependencies]
+nah-core = { path = "../core" }
