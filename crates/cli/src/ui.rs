@@ -166,7 +166,6 @@ pub fn flush() {
 /// via raw kernel32 FFI (no extra crate).
 #[cfg(windows)]
 fn enable_ansi_windows() {
-    use std::ptr;
     #[link(name = "kernel32")]
     extern "system" {
         fn GetStdHandle(n: i32) -> *mut core::ffi::c_void;
@@ -176,7 +175,7 @@ fn enable_ansi_windows() {
     unsafe {
         const STD_OUTPUT_HANDLE: i32 = -11;
         let handle = GetStdHandle(STD_OUTPUT_HANDLE);
-        if handle.is_null() || handle == ptr::null_mut() {
+        if handle.is_null() {
             return;
         }
         let mut mode: u32 = 0;
