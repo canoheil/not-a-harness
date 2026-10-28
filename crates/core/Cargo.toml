@@ -1,0 +1,12 @@
+[package]
+name = "nah-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core engine for nah: providers, text tool protocol, context manager, agent loop"
+
+[lib]
+name = "nah_core"
+path = "src/lib.rs"
+
+[dependencies]

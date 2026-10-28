@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Size report
+        shell: bash
+        run: |
+          ls -la target/release/nah* | awk '{print $5, $9}'
+
+  e2e:
+    name: e2e against mock Ollama
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run mock server
+        run: |
+          python3 scripts/mock_ollama.py 11435 &
+          sleep 1
+          curl -sf http://127.0.0.1:11435/api/tags
+
+      - name: Drive one full agent turn
+        run: |
+          mkdir -p /tmp/e2e
+          ./target/release/nah \
+            --url http://127.0.0.1:11435 \
+            --root /tmp/e2e \
+            --yes \
+            -p "create the demo notes file"
+          echo "=== produced file ==="
+          cat /tmp/e2e/demo/notes.txt
+          grep -q "second line (edited)" /tmp/e2e/demo/notes.txt
