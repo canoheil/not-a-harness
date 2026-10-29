@@ -203,7 +203,10 @@ impl ContextManager {
         let prompt = vec![
             ChatMessage::system(
                 "You compress conversation history into a short factual summary. \
-                 Keep file names, decisions, code state and open problems. \
+                 Keep file names, decisions, code state and open problems - with \
+                 paths exactly as used (they are relative to the project root). \
+                 Record only actions that tool results actually confirmed; never \
+                 record claimed-but-unverified actions as done. \
                  Reply with the summary only.",
             ),
             ChatMessage::user(format!(

@@ -409,16 +409,38 @@ impl Ui {
     pub fn tool_ok(&self, body: &str) {
         self.stream_flush();
         self.touch();
-        for line in body.lines().filter(|l| !l.trim().is_empty()).take(12) {
-            self.line_colored(DIM, &format!("| {line}"));
+        const MAX_LINES: usize = 12;
+        let mut shown = 0usize;
+        let mut hidden = 0usize;
+        for line in body.lines().filter(|l| !l.trim().is_empty()) {
+            if shown < MAX_LINES {
+                self.line_colored(DIM, &format!("| {line}"));
+                shown += 1;
+            } else {
+                hidden += 1;
+            }
+        }
+        if hidden > 0 {
+            self.line_colored(DIM, &format!("| ... ({hidden} more lines)"));
         }
     }
 
     pub fn tool_err(&self, body: &str) {
         self.stream_flush();
         self.touch();
-        for line in body.lines().filter(|l| !l.trim().is_empty()).take(12) {
-            self.line_colored(RED, &format!("| {line}"));
+        const MAX_LINES: usize = 12;
+        let mut shown = 0usize;
+        let mut hidden = 0usize;
+        for line in body.lines().filter(|l| !l.trim().is_empty()) {
+            if shown < MAX_LINES {
+                self.line_colored(RED, &format!("| {line}"));
+                shown += 1;
+            } else {
+                hidden += 1;
+            }
+        }
+        if hidden > 0 {
+            self.line_colored(RED, &format!("| ... ({hidden} more lines)"));
         }
     }
 
