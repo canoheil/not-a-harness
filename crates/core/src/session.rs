@@ -58,16 +58,29 @@ impl Default for SessionConfig {
 }
 
 pub fn system_intro(root: &str) -> String {
+    let (platform, shell_hint) = if cfg!(windows) {
+        (
+            "Windows",
+            "cmd /C - use Windows command syntax (e.g. `mkdir` without `-p`, `dir`, `type`)",
+        )
+    } else {
+        ("Linux/macOS", "sh -c - use POSIX shell syntax")
+    };
     format!(
         "You are `nah`, a coding agent working inside a project directory.\n\
-         Project root: {root}\n\n\
+         Project root: {root}\n\
+         Platform: {platform}; commands run via {shell_hint}\n\n\
          You can only read and change files through the tools below. Work step\n\
          by step: look at what exists, change one thing at a time, check the\n\
          result, and continue until the task is complete.\n\n\
          Speak to the user directly in the first person and in plain prose -\n\
          never call yourself \"the assistant\", never narrate your internal\n\
          reasoning, never repeat the same sentence or message twice, and never\n\
-         copy [TOOL RESULTS] markers into your own text."
+         copy [TOOL RESULTS] markers into your own text.\n\
+         Never claim a step succeeded unless a tool result confirms it, and\n\
+         never fabricate tool results or file contents. For simple greetings\n\
+         or questions that need no file work, reply in plain text without\n\
+         calling any tools."
     )
 }
 
@@ -161,7 +174,7 @@ impl<'a> Session<'a> {
             }
 
             let messages = self.context.build(
-                &system_intro(&self.tools.root().display().to_string()),
+                &system_intro(&crate::tools::display_path(self.tools.root())),
                 protocol::tool_protocol_doc(),
                 self.pinned_task.as_deref(),
                 &self.history,
@@ -225,11 +238,20 @@ impl<'a> Session<'a> {
                 } else {
                     let mut out = self.tools.run(action, confirm);
                     if n == 1 {
-                        out.body = format!(
-                            "{}\n(this is a repeat of an earlier call - if the goal is \
-                             already achieved, move on to the next step or finish)",
-                            out.body.trim_end()
-                        );
+                        out.body = if out.is_error {
+                            format!(
+                                "{}\n(this call FAILED - repeating it will not help. Try a \
+                                 different path or approach, and never claim success after \
+                                 an error.)",
+                                out.body.trim_end()
+                            )
+                        } else {
+                            format!(
+                                "{}\n(this is a repeat of an earlier call - if the goal is \
+                                 already achieved, move on to the next step or finish)",
+                                out.body.trim_end()
+                            )
+                        };
                     }
                     if out.changed {
                         // real state change: the loop breaker resets
@@ -270,7 +292,7 @@ impl<'a> Session<'a> {
                 .to_string(),
         ));
         let messages = self.context.build(
-            &system_intro(&self.tools.root().display().to_string()),
+            &system_intro(&crate::tools::display_path(self.tools.root())),
             protocol::tool_protocol_doc(),
             self.pinned_task.as_deref(),
             &self.history,
