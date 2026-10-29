@@ -244,6 +244,9 @@ impl ToolKit {
     ) -> Result<String, CoreError> {
         let full = self.resolve(rel)?;
         let content = content.replace("\r\n", "\n");
+        let warn = nested_root_warning(&self.root, rel)
+            .map(|w| format!("{w}\n\n"))
+            .unwrap_or_default();
         let existed = full.exists();
         if existed {
             let old =
@@ -251,7 +254,7 @@ impl ToolKit {
             if old == content {
                 return Ok(format!("'{rel}' unchanged (content identical)."));
             }
-            let preview = diff::render(&old, &content);
+            let preview = format!("{warn}{}", diff::render(&old, &content));
             let approved = confirm(&ConfirmRequest {
                 verb: "WRITE_FILE",
                 path: rel.to_string(),
@@ -267,7 +270,7 @@ impl ToolKit {
             let approved = confirm(&ConfirmRequest {
                 verb: "WRITE_FILE",
                 path: rel.to_string(),
-                preview: diff::render("", &content),
+                preview: format!("{warn}{}", diff::render("", &content)),
                 is_new_file: true,
             });
             if !approved {
@@ -282,8 +285,11 @@ impl ToolKit {
         }
         fs::write(&full, &content)
             .map_err(|e| CoreError::Tool(format!("cannot write '{rel}': {e}")))?;
+        let note = nested_root_warning(&self.root, rel)
+            .map(|w| format!("\n({w})"))
+            .unwrap_or_default();
         Ok(format!(
-            "wrote '{}' ({} lines).",
+            "wrote '{}' ({} lines).{note}",
             rel,
             content.lines().count()
         ))
@@ -297,8 +303,14 @@ impl ToolKit {
         confirm: &mut dyn FnMut(&ConfirmRequest) -> bool,
     ) -> Result<String, CoreError> {
         let full = self.resolve(rel)?;
-        let old =
-            String::from_utf8_lossy(&fs::read(&full).unwrap_or_default()).replace("\r\n", "\n");
+        let old = match fs::read(&full) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).replace("\r\n", "\n"),
+            Err(_) => {
+                return Err(CoreError::Tool(format!(
+                    "file not found: '{rel}' - use WRITE_FILE to create it"
+                )))
+            }
+        };
         if search.is_empty() {
             return Err(CoreError::Tool(
                 "SEARCH text is empty - for an empty or new file use WRITE_FILE instead".into(),
@@ -324,7 +336,14 @@ impl ToolKit {
             )));
         }
         let new = old.replacen(search, replace, 1);
-        let preview = diff::render(&old, &new);
+        let warn = nested_root_warning(&self.root, rel);
+        let preview = format!(
+            "{}{}",
+            warn.as_ref()
+                .map(|w| format!("{w}\n\n"))
+                .unwrap_or_default(),
+            diff::render(&old, &new)
+        );
         let approved = confirm(&ConfirmRequest {
             verb: "EDIT_FILE",
             path: rel.to_string(),
@@ -338,11 +357,21 @@ impl ToolKit {
         }
         fs::write(&full, &new)
             .map_err(|e| CoreError::Tool(format!("cannot write '{rel}': {e}")))?;
-        Ok(format!("edited '{rel}' in one place."))
+        Ok(format!(
+            "edited '{rel}' in one place.{}",
+            warn.map(|w| format!("\n({w})")).unwrap_or_default()
+        ))
     }
 
     fn list_dir(&self, rel: &str) -> Result<String, CoreError> {
         let full = self.resolve(rel)?;
+        if !full.exists() {
+            return Err(CoreError::Tool(format!(
+                "path not found: '{rel}' (project root: {} - tool paths are relative \
+                 to it, like 'src/main.rs')",
+                display_path(&self.root)
+            )));
+        }
         if !full.is_dir() {
             return Err(CoreError::Tool(format!("'{rel}' is not a directory")));
         }
@@ -384,7 +413,11 @@ impl ToolKit {
             Some(d) => {
                 let p = self.resolve(d)?;
                 if !p.is_dir() {
-                    return Err(CoreError::Tool(format!("'{d}' is not a directory")));
+                    return Err(CoreError::Tool(format!(
+                        "path not found: '{d}' (project root: {} - tool paths are \
+                         relative to it)",
+                        display_path(&self.root)
+                    )));
                 }
                 p
             }
@@ -524,6 +557,42 @@ pub fn display_path(path: &std::path::Path) -> String {
     match s.strip_prefix(r"\\?\") {
         Some(rest) => rest.to_string(),
         None => s,
+    }
+}
+
+/// A `rel` path whose first components replay the project root's own
+/// trailing folder names (e.g. `target/release/src/x` under a root that
+/// ends in `target/release`) almost always comes from copying the tail
+/// of an absolute path. Warn about it - but still allow the write.
+pub fn nested_root_warning(root: &std::path::Path, rel: &str) -> Option<String> {
+    let tail: Vec<String> = root
+        .components()
+        .rev()
+        .take(2)
+        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if tail.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = rel.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let head: Vec<String> = parts
+        .iter()
+        .take(tail.len())
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    if head == tail && parts.len() > tail.len() {
+        Some(format!(
+            "warning: '{rel}' starts with '{}' - that nests a copy of the root's own \
+             folders inside the project. Tool paths are relative to the project root; \
+             did you mean '{}'?",
+            tail.join("/"),
+            parts[tail.len()..].join("/")
+        ))
+    } else {
+        None
     }
 }
 
@@ -881,5 +950,60 @@ mod tests {
         );
         // plain paths are untouched
         assert_eq!(display_path(std::path::Path::new("/home/x")), "/home/x");
+    }
+
+    #[test]
+    fn nested_root_paths_are_flagged() {
+        use std::path::Path;
+        // absolute-path tail copied into a relative path: classic doubled dir
+        let w = nested_root_warning(Path::new("/p/target/release"), "target/release/src/main.py");
+        let w = w.expect("should warn");
+        assert!(w.contains("target/release"), "{w}");
+        assert!(w.contains("src/main.py"), "{w}");
+        // windows-style separators in the relative path match too
+        assert!(
+            nested_root_warning(Path::new("/p/target/release"), "target\\release\\src\\x")
+                .is_some()
+        );
+        // ordinary paths are silent
+        assert!(nested_root_warning(Path::new("/p/target/release"), "src/main.py").is_none());
+        assert!(nested_root_warning(Path::new("/home/user/proj"), "src/main.rs").is_none());
+    }
+
+    #[test]
+    fn edit_of_missing_file_points_to_write_file() {
+        let dir = std::env::temp_dir().join("nah_edit_missing");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let kit = ToolKit::new(dir.clone(), 4096);
+        let err = kit
+            .edit_file("ghost.txt", "a", "b", &mut |_| true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("file not found"), "{err}");
+        assert!(err.contains("WRITE_FILE"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_result_carries_nested_path_note() {
+        let dir = std::env::temp_dir().join("nah_write_note");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let kit = ToolKit::new(dir.clone(), 4096);
+        // rebuild the root tail under the root itself to trigger the warning
+        let tail: Vec<String> = dir
+            .components()
+            .rev()
+            .take(2)
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let rel = format!("{}/sub/inner.txt", tail.join("/"));
+        let out = kit.write_file(&rel, "x\n", &mut |_| true).unwrap();
+        assert!(out.contains("warning:"), "{out}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

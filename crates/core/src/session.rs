@@ -313,12 +313,15 @@ impl<'a> Session<'a> {
         if let Some(t) = first_token {
             stats.gen_secs += t.elapsed().as_secs_f64();
         }
-        if protocol::parse(&reply).prose.trim().is_empty() {
+        // store the final answer clean as well - a reply that is only
+        // echoed markers is no reply at all (the user must see that).
+        let stored = protocol::sanitize_text(&protocol::normalize_function_calls(&reply), 40);
+        if protocol::parse(&stored).prose.trim().is_empty() {
             on_event(&Event::Info(
                 "[warn] the model produced no final answer text".into(),
             ));
         }
-        self.history.push(ChatMessage::assistant(reply));
+        self.history.push(ChatMessage::assistant(stored));
         on_event(&Event::TurnDone);
         Ok(stats)
     }
