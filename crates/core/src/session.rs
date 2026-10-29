@@ -63,7 +63,11 @@ pub fn system_intro(root: &str) -> String {
          Project root: {root}\n\n\
          You can only read and change files through the tools below. Work step\n\
          by step: look at what exists, change one thing at a time, check the\n\
-         result, and continue until the task is complete."
+         result, and continue until the task is complete.\n\n\
+         Speak to the user directly in the first person and in plain prose -\n\
+         never call yourself \"the assistant\", never narrate your internal\n\
+         reasoning, never repeat the same sentence or message twice, and never\n\
+         copy [TOOL RESULTS] markers into your own text."
     )
 }
 
@@ -180,19 +184,24 @@ impl<'a> Session<'a> {
             }
 
             let parsed = protocol::parse(&reply);
-            for block in &parsed.invalid_blocks {
-                on_event(&Event::Info(format!(
-                    "[warn] model emitted an invalid tool block (kept as text):\n{block}"
-                )));
+            for _block in &parsed.invalid_blocks {
+                on_event(&Event::Info(
+                    "[warn] model emitted an invalid tool block (ignored)".to_string(),
+                ));
             }
 
+            // store the reply clean: XML calls normalized to fenced blocks
+            // (so the model learns the right format from its own history),
+            // echoed internal markers and runaway repetition removed.
+            let stored = protocol::sanitize_text(&protocol::normalize_function_calls(&reply), 40);
+
             if parsed.actions.is_empty() {
-                self.history.push(ChatMessage::assistant(reply));
+                self.history.push(ChatMessage::assistant(stored));
                 on_event(&Event::TurnDone);
                 return Ok(stats);
             }
 
-            self.history.push(ChatMessage::assistant(reply));
+            self.history.push(ChatMessage::assistant(stored));
 
             let mut results = String::from("[TOOL RESULTS]");
             for action in &parsed.actions {

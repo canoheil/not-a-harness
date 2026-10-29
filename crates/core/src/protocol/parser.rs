@@ -27,6 +27,9 @@ enum State {
 }
 
 pub fn parse(text: &str) -> ParsedOutput {
+    // small non-coder models often emit `<function name="...">` XML calls
+    // instead of fenced blocks - fold those into the fenced form first.
+    let text = normalize_function_calls(text);
     let mut out = ParsedOutput::default();
 
     // prose lines accumulated so far
@@ -149,6 +152,9 @@ pub fn parse(text: &str) -> ParsedOutput {
                     }
                 } else if t.is_empty() {
                     // blank lines between params are fine
+                } else if matches!(t, MID_MARK | REPLACE_MARK | CONTENT_END) {
+                    // degenerate duplicate closing markers (small models
+                    // sometimes echo them after a complete pair) - ignore
                 } else {
                     abort(&mut block, &mut prose);
                     reset(
@@ -277,6 +283,106 @@ fn reset(
     *command = None;
     *cmd_cwd = None;
     *cmd_timeout = None;
+}
+
+/// Fold `<function name="X"> ... </function>` calls into fenced tool
+/// blocks. Some chat models have a strong XML function-call prior; their
+/// bodies use our parameter syntax, so one rewrite makes them executable.
+/// Best-effort and line-oriented - never panics.
+pub fn normalize_function_calls(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut body: Vec<String> = Vec::new();
+    let mut name: Option<String> = None;
+
+    fn flush(out: &mut Vec<String>, body: &mut Vec<String>, name: &mut Option<String>) {
+        if let Some(n) = name.take() {
+            out.push(OPEN.to_string());
+            out.push(n);
+            out.append(body);
+            out.push(CLOSE.to_string());
+        }
+        body.clear();
+    }
+
+    for raw in text.lines() {
+        let line = raw.trim_end_matches('\r');
+        let t = line.trim();
+        if t.starts_with("<function") {
+            flush(&mut out, &mut body, &mut name);
+            let gt = t.find('>').map(|i| i + 1).unwrap_or(t.len());
+            name = tag_attr(&t[..gt], "name");
+            let rest = clean_tags(&t[gt..]);
+            if !rest.trim().is_empty() {
+                body.push(rest);
+            }
+            if t.contains("</function>") {
+                flush(&mut out, &mut body, &mut name);
+            }
+        } else if name.is_some() {
+            if let Some(idx) = t.find("</function>") {
+                let rest = clean_tags(&t[..idx]);
+                if !rest.trim().is_empty() {
+                    body.push(rest);
+                }
+                flush(&mut out, &mut body, &mut name);
+            } else {
+                body.push(clean_tags(line));
+            }
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    flush(&mut out, &mut body, &mut name);
+    out.join("\n")
+}
+
+/// Strip XML-ish tags from a fragment. `<param name="k">v</param>` and
+/// `<name>k</name>` pairs become `k: v`; other tags are dropped. A `<`
+/// that does not start a real tag (e.g. `<<<<<<< SEARCH`) is literal text.
+fn clean_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(lt) = rest.find('<') {
+        let after = &rest[lt + 1..];
+        let tag_like = after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '/' || c == '!');
+        if !tag_like {
+            out.push_str(&rest[..=lt]); // keep the literal '<'
+            rest = after;
+            continue;
+        }
+        out.push_str(&rest[..lt]);
+        let Some(gt) = after.find('>') else {
+            // unterminated real tag: drop the trailing garbage
+            return out.trim_end().to_string();
+        };
+        let tag = &after[..gt];
+        if tag.starts_with("param") || tag.starts_with("name") {
+            if let Some(k) = tag_attr(tag, "name") {
+                out.push_str(&k);
+                out.push_str(": ");
+            }
+        }
+        rest = &after[gt + 1..];
+    }
+    out.push_str(rest);
+    out.trim_end().to_string()
+}
+
+/// Extract `attr="value"` (single quotes too) from a tag fragment.
+fn tag_attr(tag: &str, attr: &str) -> Option<String> {
+    let i = tag.find(attr)? + attr.len();
+    let rest = tag[i..].trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &rest[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].trim().to_string())
 }
 
 #[cfg(test)]
@@ -464,5 +570,83 @@ mod tests {
         };
         let label = crate::protocol::action_label(&a);
         assert!(label.chars().count() < 80, "{label}");
+    }
+
+    #[test]
+    fn xml_call_with_inline_params() {
+        // real output from openbmb/minicpm5-2b: mixed bogus closing tags
+        let p =
+            parse("Reading.\n<function name=\"READ_FILE\">path: src/nah.exe</param></function>\n");
+        assert_eq!(
+            p.actions,
+            vec![Action::ReadFile {
+                path: "src/nah.exe".into(),
+                offset: None,
+                limit: None
+            }]
+        );
+        assert!(p.prose.contains("Reading."));
+    }
+
+    #[test]
+    fn xml_call_unterminated_then_next_call() {
+        // first call closes with a bogus tag, second opens right after
+        let text = "<function name=\"LIST_DIR\">path: src</name>\n\
+                    <function name=\"READ_FILE\">path: a.txt</param></function>";
+        let p = parse(text);
+        assert_eq!(
+            p.actions,
+            vec![
+                Action::ListDir { path: "src".into() },
+                Action::ReadFile {
+                    path: "a.txt".into(),
+                    offset: None,
+                    limit: None
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn xml_edit_multiline_with_degenerate_markers() {
+        // real output from the log: SEARCH/REPLACE body + repeated closers
+        let text = "<function name=\"EDIT_FILE\"> path: hello.txt\n\
+                    <<<<<<< SEARCH\nHello, World!\n=======\nGoodbye, world!\n>>>>>>> REPLACE\n=======\n=======\n>>>>>>> REPLACE\n>>>>>>> REPLACE\n";
+        let p = parse(text);
+        assert_eq!(
+            p.actions,
+            vec![Action::EditFile {
+                path: "hello.txt".into(),
+                search: "Hello, World!".into(),
+                replace: "Goodbye, world!".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn xml_param_tag_form() {
+        let p = parse("<function name='LIST_DIR'><param name=\"path\">src</param></function>");
+        assert_eq!(p.actions, vec![Action::ListDir { path: "src".into() }]);
+    }
+
+    #[test]
+    fn fenced_block_with_duplicate_closers_is_valid() {
+        let text = "```tool\nEDIT_FILE\npath: a.txt\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n=======\n>>>>>>> REPLACE\n```";
+        let p = parse(text);
+        assert_eq!(
+            p.actions,
+            vec![Action::EditFile {
+                path: "a.txt".into(),
+                search: "x".into(),
+                replace: "y".into()
+            }]
+        );
+        assert!(p.invalid_blocks.is_empty());
+    }
+
+    #[test]
+    fn xml_block_missing_args_is_invalid_not_executed() {
+        let p = parse("<function name=\"READ_FILE\"></function>");
+        assert!(p.actions.is_empty());
     }
 }

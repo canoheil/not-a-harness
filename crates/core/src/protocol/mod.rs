@@ -34,6 +34,7 @@
 
 pub mod parser;
 
+pub use self::parser::normalize_function_calls;
 pub use self::parser::parse;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +95,65 @@ pub struct ParsedOutput {
     /// Blocks that looked like tool blocks but failed validation
     /// (surfaced to the user so the model's intent isn't silently lost).
     pub invalid_blocks: Vec<String>,
+}
+
+/// Internal marker lines that only ever appear in *our* tool-result
+/// messages. When a model echoes them back they are noise, never content.
+pub fn is_internal_marker(line: &str) -> bool {
+    let t = line.trim();
+    t == "[TOOL RESULTS]" || t == "--- end ---"
+}
+
+/// Line-level output hygiene for model text: drops echoed internal
+/// markers and collapses runaway repetition (small local models sometimes
+/// degenerate into repeating one line forever).
+///
+/// `min_repeat_len` guards legitimate short repeats (e.g. closing braces in
+/// code): only lines at least this long are collapsed.
+pub struct LineSanitizer {
+    last: String,
+    repeats: usize,
+    min_repeat_len: usize,
+}
+
+impl LineSanitizer {
+    pub fn new(min_repeat_len: usize) -> Self {
+        LineSanitizer {
+            last: String::new(),
+            repeats: 0,
+            min_repeat_len,
+        }
+    }
+
+    /// Feed one line; `None` means the line should be dropped.
+    pub fn push(&mut self, line: &str) -> Option<String> {
+        if is_internal_marker(line) {
+            return None;
+        }
+        let empty = line.trim().is_empty();
+        if !empty && line.trim_end() == self.last {
+            self.repeats += 1;
+            if self.repeats >= 3 && line.trim().chars().count() >= self.min_repeat_len {
+                return None;
+            }
+        } else {
+            self.last = line.trim_end().to_string();
+            self.repeats = 1;
+        }
+        Some(line.to_string())
+    }
+}
+
+/// Whole-message variant of [`LineSanitizer`] for history storage.
+pub fn sanitize_text(text: &str, min_repeat_len: usize) -> String {
+    let mut san = LineSanitizer::new(min_repeat_len);
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if let Some(l) = san.push(line) {
+            out.push(l);
+        }
+    }
+    out.join("\n")
 }
 
 /// Short human-readable label, e.g. `READ_FILE src/main.rs`.
@@ -188,7 +248,7 @@ HOW TO WORK
 6. When the task is finished, reply to the user in plain text, briefly, with no tool block.
 
 RULES
-- Never use JSON. Only the fenced tool blocks shown above.
+- Tool calls are ONLY the fenced tool blocks shown above. Never use JSON, XML tags (like `<function>`), or any other format.
 - Never invent tool names or keys: READ_FILE, WRITE_FILE, EDIT_FILE, LIST_DIR, RUN_COMMAND.
 - Do not only describe planned changes — make them with the tools.
 - Paths are relative to the project root.

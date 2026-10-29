@@ -386,7 +386,7 @@ impl ToolKit {
 
         let mut preview = format!(
             "shell: {shell_desc}\nruns in: {}\ntimeout: {timeout_s}s",
-            dir.display()
+            crate::tools::display_path(&dir)
         );
         if looks_destructive(command) {
             preview.push_str("\n! warning: this command looks destructive");
@@ -503,6 +503,16 @@ impl ToolKit {
             body.push_str("\n... truncated by harness");
         }
         Ok(body)
+    }
+}
+
+/// Human-facing path display: strips the Windows verbatim prefix
+/// (`\\?\C:\...`) that `canonicalize()` leaves in.
+pub fn display_path(path: &std::path::Path) -> String {
+    let s = path.display().to_string();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => rest.to_string(),
+        None => s,
     }
 }
 
@@ -850,5 +860,15 @@ mod tests {
             assert!(w.is_error, "symlink escape must be rejected");
             assert!(!outside.join("evil.txt").exists());
         }
+    }
+
+    #[test]
+    fn display_path_strips_windows_verbatim_prefix() {
+        assert_eq!(
+            display_path(std::path::Path::new(r"\\?\C:\Users\x\proj")),
+            r"C:\Users\x\proj"
+        );
+        // plain paths are untouched
+        assert_eq!(display_path(std::path::Path::new("/home/x")), "/home/x");
     }
 }
