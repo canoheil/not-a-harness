@@ -121,16 +121,27 @@ impl<'a> Repl<'a> {
             }
         };
 
-        if let Err(e) = self.session.run_turn(input, &mut confirm_fn, &mut on_event) {
-            self.ui.spinner_off();
-            self.ui.stream_flush();
-            self.ui.error(&e.to_string());
-        } else {
-            let (tokens, msgs) = self.session.context_usage();
-            self.ui.stat(&format!(
-                "context: ~{}/{} tokens - {} messages  (/compact summarizes)",
-                tokens, self.config.ctx_tokens, msgs
-            ));
+        match self.session.run_turn(input, &mut confirm_fn, &mut on_event) {
+            Ok(stats) => {
+                if stats.est_tokens > 0 {
+                    self.ui.stat(&format!(
+                        "~{} tok/s - {} tokens - {:.1}s",
+                        stats.tokens_per_sec().round() as u64,
+                        stats.est_tokens,
+                        stats.gen_secs
+                    ));
+                }
+                let (tokens, msgs) = self.session.context_usage();
+                self.ui.stat(&format!(
+                    "context: ~{}/{} tokens - {} messages  (/compact summarizes)",
+                    tokens, self.config.ctx_tokens, msgs
+                ));
+            }
+            Err(e) => {
+                self.ui.spinner_off();
+                self.ui.stream_flush();
+                self.ui.error(&e.to_string());
+            }
         }
     }
 
@@ -346,6 +357,14 @@ pub fn run_oneshot(
     let result = session.run_turn(prompt, &mut confirm_fn, &mut on_event);
     ui.spinner_off();
     ui.stream_flush();
-    result?;
+    let stats = result?;
+    if stats.est_tokens > 0 {
+        ui.stat(&format!(
+            "~{} tok/s - {} tokens - {:.1}s",
+            stats.tokens_per_sec().round() as u64,
+            stats.est_tokens,
+            stats.gen_secs
+        ));
+    }
     Ok(())
 }
