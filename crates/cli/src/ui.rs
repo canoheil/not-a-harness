@@ -177,11 +177,14 @@ impl ToolBlockFilter {
 /// call line. The symmetric check matters: token-sized deltas split those
 /// lines mid-way, and the pieces must not leak to the screen.
 fn needs_hold(t: &str) -> bool {
-    let s = t.trim_start();
-    let overlaps = |target: &str| target.starts_with(s) || s.starts_with(target);
+    let s = t.trim_start().to_ascii_lowercase();
+    let overlaps = |target: &str| target.starts_with(s.as_str()) || s.starts_with(target);
     overlaps("```tool")
         || overlaps("```")
-        || overlaps("[TOOL RESULTS]")
+        || overlaps("[tool results]")
+        || overlaps("[tool result]")
+        || overlaps("--- output ---")
+        || overlaps("--- end of output")
         || overlaps("--- end ---")
         || overlaps("<function")
 }
@@ -937,5 +940,17 @@ mod tests {
         }
         out.push_str(&f.flush());
         assert_eq!(out, "ok\nfine\ndone\n");
+    }
+
+    #[test]
+    fn filter_hides_fake_result_narration_and_think_tags() {
+        let mut f = ToolBlockFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.push("[TOOL RESULTS] show the file list. Let me explore.\n"));
+        out.push_str(&f.push("[tool result] READ_FILE test.txt (ok)\n"));
+        out.push_str(&f.push("</think>\n"));
+        out.push_str(&f.push("Real answer.\n"));
+        out.push_str(&f.flush());
+        assert_eq!(out, "Real answer.\n");
     }
 }

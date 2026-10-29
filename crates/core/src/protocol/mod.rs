@@ -98,10 +98,17 @@ pub struct ParsedOutput {
 }
 
 /// Internal marker lines that only ever appear in *our* tool-result
-/// messages. When a model echoes them back they are noise, never content.
+/// messages. When a model echoes them back (often with made-up
+/// continuations like `[TOOL RESULTS] say the file was edited.`) they are
+/// noise, never content. Template think tags count too.
 pub fn is_internal_marker(line: &str) -> bool {
     let t = line.trim();
-    t == "[TOOL RESULTS]" || t == "--- end ---"
+    let lower = t.to_ascii_lowercase();
+    lower.starts_with("[tool result") // [TOOL RESULTS] / [tool result] - any continuation
+        || lower.starts_with("--- end ---")
+        || lower.starts_with("--- output ---")
+        || lower.starts_with("--- end of output")
+        || matches!(t, "<think>" | "</think>" | "</output>" | "<output>")
 }
 
 /// Line-level output hygiene for model text: drops echoed internal
@@ -249,6 +256,8 @@ HOW TO WORK
 
 RULES
 - Tool calls are ONLY the fenced tool blocks shown above. Never use JSON, XML tags (like `<function>`), or any other format.
+- Never write `[TOOL RESULTS]` or fake tool results - the system sends those messages, you never do.
+- Never claim a step succeeded unless the tool result confirms it; report failures honestly.
 - Never invent tool names or keys: READ_FILE, WRITE_FILE, EDIT_FILE, LIST_DIR, RUN_COMMAND.
 - Do not only describe planned changes — make them with the tools.
 - Paths are relative to the project root.
@@ -256,13 +265,16 @@ RULES
 
 EXAMPLE OF ONE CHANGE
 User: "fix the greeting in hello.txt"
-You:
+Your reply contains a tool block:
 ```tool
 READ_FILE
 path: hello.txt
 ```
-[TOOL RESULTS] show the file content: "Helo world!"
-You:
+The system then sends you a tool result message (never write these yourself):
+[TOOL RESULTS]
+Helo world!
+--- end ---
+Your next reply contains:
 ```tool
 EDIT_FILE
 path: hello.txt
@@ -272,14 +284,34 @@ Helo world!
 Hello world!
 >>>>>>> REPLACE
 ```
-[TOOL RESULTS] say the file was edited.
-You:
+The system replies:
+[TOOL RESULTS]
+edited 'hello.txt' in one place.
+--- end ---
+Your final reply is plain text:
 Fixed the greeting in hello.txt."#
 }
 
 #[cfg(test)]
 mod doc_tests {
     use super::*;
+
+    #[test]
+    fn marker_detection_covers_fake_forms() {
+        // real markers
+        assert!(is_internal_marker("[TOOL RESULTS]"));
+        assert!(is_internal_marker("--- end ---"));
+        // fake narration with continuation (observed from real models)
+        assert!(is_internal_marker("[TOOL RESULTS] show the file list."));
+        assert!(is_internal_marker("[tool result] READ_FILE test.txt (ok)"));
+        assert!(is_internal_marker("--- output ---"));
+        assert!(is_internal_marker("--- end of output"));
+        // template think tags
+        assert!(is_internal_marker("</think>"));
+        assert!(is_internal_marker("<think>"));
+        // ordinary prose is untouched
+        assert!(!is_internal_marker("The file is ready."));
+    }
 
     /// The worked examples inside the prompt must stay valid per the
     /// parser - a drifting example teaches weak models the wrong format.

@@ -92,7 +92,10 @@ impl ToolKit {
                 }
                 Component::Normal(part) => clean.push(part),
                 Component::RootDir | Component::Prefix(_) => {
-                    return Err(CoreError::Tool(format!("bad path: '{rel}'")));
+                    return Err(CoreError::Tool(format!(
+                        "bad path: '{rel}' - use a path relative to the project \
+                         root (like 'src/main.rs'), never a drive or UNC path"
+                    )));
                 }
             }
         }
@@ -297,10 +300,18 @@ impl ToolKit {
         let old =
             String::from_utf8_lossy(&fs::read(&full).unwrap_or_default()).replace("\r\n", "\n");
         if search.is_empty() {
-            return Err(CoreError::Tool("SEARCH text is empty".into()));
+            return Err(CoreError::Tool(
+                "SEARCH text is empty - for an empty or new file use WRITE_FILE instead".into(),
+            ));
         }
         let hits = old.matches(search).count();
         if hits == 0 {
+            if old.is_empty() {
+                return Err(CoreError::Tool(format!(
+                    "'{rel}' is empty - EDIT_FILE needs existing text to match. \
+                     Use WRITE_FILE to give the file its content."
+                )));
+            }
             return Err(CoreError::Tool(format!(
                 "SEARCH text not found in '{rel}'. READ_FILE the current content first \
                  and retry with an exact match (whitespace matters)."
