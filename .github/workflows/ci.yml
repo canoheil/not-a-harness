@@ -30,9 +30,12 @@ jobs:
         run: |
           set +e
           cargo clippy --all-targets -- -D warnings > clippy_out.txt 2>&1
-          grep -E "^error|^ *-->|^ *= note|^help" clippy_out.txt | head -60 | while IFS= read -r line; do
-            esc=${line//'%'/'%25'}
-            esc=${esc//$'\r'/'%0D'}
+          code=$?
+          total=$(wc -c < clippy_out.txt)
+          echo "::error::clippy exit=$code bytes=$total"
+          split -b 3000 clippy_out.txt clippy_chunk_
+          for f in clippy_chunk_*; do
+            esc=$(sed -e 's/%/%25/g' "$f" | awk '{printf "%s%0A", $0}' | head -c 3000)
             echo "::error::${esc}"
           done
 
