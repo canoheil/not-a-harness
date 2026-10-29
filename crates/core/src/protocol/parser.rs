@@ -42,6 +42,9 @@ pub fn parse(text: &str) -> ParsedOutput {
     let mut content: Vec<String> = Vec::new();
     let mut search: Vec<String> = Vec::new();
     let mut replace: Vec<String> = Vec::new();
+    let mut command: Option<String> = None;
+    let mut cmd_cwd: Option<String> = None;
+    let mut cmd_timeout: Option<u32> = None;
 
     // drop the candidate block back into prose (aborted / malformed)
     fn abort(block: &mut Vec<String>, prose: &mut Vec<String>) {
@@ -67,7 +70,10 @@ pub fn parse(text: &str) -> ParsedOutput {
                 if t.is_empty() {
                     continue;
                 }
-                if matches!(t, "READ_FILE" | "WRITE_FILE" | "EDIT_FILE" | "LIST_DIR") {
+                if matches!(
+                    t,
+                    "READ_FILE" | "WRITE_FILE" | "EDIT_FILE" | "LIST_DIR" | "RUN_COMMAND"
+                ) {
                     name = t.to_string();
                     state = State::Params;
                 } else {
@@ -79,7 +85,18 @@ pub fn parse(text: &str) -> ParsedOutput {
                 block.push(line.to_string());
                 let t = line.trim();
                 if t == CLOSE {
-                    match make_action(&name, &path, offset, &limit, &content, &search, &replace) {
+                    match make_action(
+                        &name,
+                        &path,
+                        offset,
+                        &limit,
+                        &content,
+                        &search,
+                        &replace,
+                        &command,
+                        &cmd_cwd,
+                        cmd_timeout,
+                    ) {
                         Some(action) => {
                             block.clear(); // consumed
                             out.actions.push(action);
@@ -97,6 +114,9 @@ pub fn parse(text: &str) -> ParsedOutput {
                         &mut content,
                         &mut search,
                         &mut replace,
+                        &mut command,
+                        &mut cmd_cwd,
+                        &mut cmd_timeout,
                     );
                     state = State::Prose;
                 } else if t == "content:" && name == "WRITE_FILE" {
@@ -114,6 +134,17 @@ pub fn parse(text: &str) -> ParsedOutput {
                         }
                         "offset" => offset = value.parse().ok(),
                         "limit" => limit = value.parse().ok(),
+                        "command" => {
+                            if !value.is_empty() {
+                                command = Some(value.to_string());
+                            }
+                        }
+                        "cwd" => {
+                            if !value.is_empty() {
+                                cmd_cwd = Some(value.to_string());
+                            }
+                        }
+                        "timeout" => cmd_timeout = value.parse().ok(),
                         _ => {} // ignore unknown keys, stay tolerant
                     }
                 } else if t.is_empty() {
@@ -128,6 +159,9 @@ pub fn parse(text: &str) -> ParsedOutput {
                         &mut content,
                         &mut search,
                         &mut replace,
+                        &mut command,
+                        &mut cmd_cwd,
+                        &mut cmd_timeout,
                     );
                     state = State::Prose;
                 }
@@ -176,7 +210,18 @@ fn make_action(
     content: &[String],
     search: &[String],
     replace: &[String],
+    command: &Option<String>,
+    cmd_cwd: &Option<String>,
+    cmd_timeout: Option<u32>,
 ) -> Option<Action> {
+    if name == "RUN_COMMAND" {
+        let command = command.clone()?;
+        return Some(Action::RunCommand {
+            command,
+            cwd: cmd_cwd.clone(),
+            timeout: cmd_timeout,
+        });
+    }
     let p = path.clone()?;
     match name {
         "READ_FILE" => Some(Action::ReadFile {
@@ -209,6 +254,7 @@ fn make_action(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reset(
     name: &mut String,
     path: &mut Option<String>,
@@ -217,6 +263,9 @@ fn reset(
     content: &mut Vec<String>,
     search: &mut Vec<String>,
     replace: &mut Vec<String>,
+    command: &mut Option<String>,
+    cmd_cwd: &mut Option<String>,
+    cmd_timeout: &mut Option<u32>,
 ) {
     name.clear();
     *path = None;
@@ -225,6 +274,9 @@ fn reset(
     content.clear();
     search.clear();
     replace.clear();
+    *command = None;
+    *cmd_cwd = None;
+    *cmd_timeout = None;
 }
 
 #[cfg(test)]
@@ -361,5 +413,56 @@ mod tests {
         assert!(p.prose.contains("before"));
         assert!(p.prose.contains("this is not a param"), "{:?}", p.prose);
         assert!(p.prose.contains("after"));
+    }
+
+    #[test]
+    fn run_command_parses_with_optional_keys() {
+        let text = "```tool\nRUN_COMMAND\ncommand: cargo build --release\ncwd: crates/core\ntimeout: 60\n```";
+        let p = parse(text);
+        assert!(p.invalid_blocks.is_empty(), "{:?}", p.invalid_blocks);
+        assert_eq!(p.actions.len(), 1);
+        match &p.actions[0] {
+            Action::RunCommand {
+                command,
+                cwd,
+                timeout,
+            } => {
+                assert_eq!(command, "cargo build --release");
+                assert_eq!(cwd.as_deref(), Some("crates/core"));
+                assert_eq!(*timeout, Some(60));
+            }
+            other => panic!("wrong action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_command_keeps_colons_in_command() {
+        let text = "```tool\nRUN_COMMAND\ncommand: sh -c \"echo a:b\"\n```";
+        let p = parse(text);
+        assert_eq!(p.actions.len(), 1);
+        match &p.actions[0] {
+            Action::RunCommand { command, .. } => assert_eq!(command, "sh -c \"echo a:b\""),
+            other => panic!("wrong action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_command_without_command_is_invalid() {
+        let text = "```tool\nRUN_COMMAND\ncwd: .\n```";
+        let p = parse(text);
+        assert!(p.actions.is_empty());
+        assert_eq!(p.invalid_blocks.len(), 1);
+    }
+
+    #[test]
+    fn run_command_truncated_label() {
+        let long = "x".repeat(100);
+        let a = Action::RunCommand {
+            command: long,
+            cwd: None,
+            timeout: None,
+        };
+        let label = crate::protocol::action_label(&a);
+        assert!(label.chars().count() < 80, "{label}");
     }
 }

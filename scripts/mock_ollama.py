@@ -28,6 +28,10 @@ REPLY_1 = (
     "second line (edited)\n"
     ">>>>>>> REPLACE\n"
     "```\n"
+    "```tool\n"
+    "RUN_COMMAND\n"
+    "command: echo nah-e2e-cmd-ok\n"
+    "```\n"
 )
 REPLY_2 = "تمام شد — فایل ساخته و ویرایش شد."
 

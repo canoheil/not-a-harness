@@ -81,6 +81,20 @@ impl ContextManager {
         &self.open_files
     }
 
+    /// Rough token usage of what a request would carry: summary + working
+    /// set + history. Deliberately approximate (chars/4) - it feeds the
+    /// UI's context-usage line, not the budget logic.
+    pub fn estimate_usage(&self, history: &[ChatMessage]) -> usize {
+        let mut total = estimate_tokens(&self.summary);
+        for f in &self.open_files {
+            total += estimate_tokens(&f.content);
+        }
+        for m in history {
+            total += estimate_tokens(&m.content);
+        }
+        total
+    }
+
     pub fn reset(&mut self) {
         self.open_files.clear();
         self.summary.clear();
@@ -281,5 +295,25 @@ mod tests {
         cm.note_file("a.rs", "new");
         assert_eq!(cm.open_files().len(), 1);
         assert_eq!(cm.open_files()[0].content, "new");
+    }
+
+    #[test]
+    fn estimate_usage_counts_files_and_history() {
+        let cm = ContextManager::new(ContextConfig {
+            ctx_tokens: 4096,
+            history_messages: 4,
+            max_open_files: 4,
+            auto_compact: true,
+        });
+        let empty = cm.estimate_usage(&[]);
+        assert_eq!(empty, 0);
+
+        let mut cm = cm;
+        cm.note_file("a.rs", "12345678"); // 8 chars -> 2 tokens
+        let history = vec![
+            ChatMessage::user("abcdefgh"),              // 2 tokens
+            ChatMessage::assistant("abcdefghijklmnop"), // 4 tokens
+        ];
+        assert_eq!(cm.estimate_usage(&history), 2 + 2 + 4);
     }
 }

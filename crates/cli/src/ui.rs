@@ -302,10 +302,16 @@ impl Ui {
         self.line_colored(MAGENTA, &format!("tool: {label}"));
     }
 
+    /// Quiet status line (dim) - context usage and similar telemetry.
+    pub fn stat(&self, text: &str) {
+        self.touch();
+        self.line_colored(DIM, text);
+    }
+
     pub fn tool_ok(&self, body: &str) {
         self.stream_flush();
         self.touch();
-        for line in body.lines().take(12) {
+        for line in body.lines().filter(|l| !l.trim().is_empty()).take(12) {
             self.line_colored(DIM, &format!("| {line}"));
         }
     }
@@ -313,7 +319,7 @@ impl Ui {
     pub fn tool_err(&self, body: &str) {
         self.stream_flush();
         self.touch();
-        for line in body.lines().take(12) {
+        for line in body.lines().filter(|l| !l.trim().is_empty()).take(12) {
             self.line_colored(RED, &format!("| {line}"));
         }
     }
@@ -346,16 +352,23 @@ impl Ui {
         ok && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
     }
 
-    /// Confirmation dialog for file writes/edits. Returns true to approve.
-    pub fn confirm(&self, _verb: &str, path: &str, preview: &str, is_new: bool) -> bool {
+    /// Confirmation dialog for file writes/edits and command runs.
+    /// Returns true to approve.
+    pub fn confirm(&self, verb: &str, path: &str, preview: &str, is_new: bool) -> bool {
         self.stream_flush();
         self.spinner_off();
-        let kind = if is_new { "create file" } else { "modify file" };
+        let kind = if verb == "RUN_COMMAND" {
+            "run command"
+        } else if is_new {
+            "create file"
+        } else {
+            "modify file"
+        };
         println!("\n{} -> {}", self.paint(BOLD, kind), self.paint(CYAN, path));
         for line in preview.lines().take(60) {
             let colored = if line.starts_with('+') {
                 self.paint(GREEN, line)
-            } else if line.starts_with('-') {
+            } else if line.starts_with('-') || line.starts_with('!') {
                 self.paint(RED, line)
             } else if line.starts_with("...") {
                 self.paint(DIM, line)

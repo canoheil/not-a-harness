@@ -7,6 +7,25 @@ use crate::provider::{ChatMessage, ChatOptions, ChatRequest, LlmProvider};
 use crate::tools::{ConfirmRequest, ToolKit, ToolOutput};
 use std::collections::HashMap;
 
+/// Generation statistics for one completed turn: estimated tokens the
+/// model produced and the time spent generating (first token to last
+/// token per reply, summed - tool execution gaps are excluded).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TurnStats {
+    pub est_tokens: usize,
+    pub gen_secs: f64,
+}
+
+impl TurnStats {
+    pub fn tokens_per_sec(&self) -> f64 {
+        if self.gen_secs > 0.0 {
+            self.est_tokens as f64 / self.gen_secs
+        } else {
+            0.0
+        }
+    }
+}
+
 /// Events surfaced to the UI while a turn runs.
 pub enum Event<'a> {
     /// A raw text fragment streamed from the model.
@@ -80,13 +99,34 @@ impl<'a> Session<'a> {
         self.pinned_task = None;
     }
 
-    /// Run one user turn to completion (or until max_steps).
+    /// Approximate context usage for the UI: (tokens, messages).
+    pub fn context_usage(&self) -> (usize, usize) {
+        (
+            self.context.estimate_usage(&self.history),
+            self.history.len(),
+        )
+    }
+
+    /// Manually trigger history summarization (/compact). Returns the
+    /// number of messages absorbed into the rolling summary.
+    pub fn force_compact(&mut self) -> Result<usize, CoreError> {
+        let cut =
+            self.context
+                .compact(self.provider.as_mut(), &self.config.model, &self.history)?;
+        if cut > 0 {
+            self.history.drain(..cut);
+        }
+        Ok(cut)
+    }
+
+    /// Run one user turn to completion (or until max_steps). Returns
+    /// generation statistics (estimated tokens, generation time).
     pub fn run_turn(
         &mut self,
         user_input: &str,
         confirm: &mut dyn FnMut(&ConfirmRequest) -> bool,
         on_event: &mut dyn FnMut(&Event<'_>),
-    ) -> Result<(), CoreError> {
+    ) -> Result<TurnStats, CoreError> {
         if self.pinned_task.is_none() {
             self.pinned_task = Some(user_input.to_string());
         }
@@ -94,6 +134,8 @@ impl<'a> Session<'a> {
 
         // duplicate-call loop breaker state (per turn)
         let mut action_counts: HashMap<String, usize> = HashMap::new();
+        // generation statistics (per reply: first token -> last token)
+        let mut stats = TurnStats::default();
 
         for _step in 0..self.config.max_steps {
             // compaction keeps old turns from eating the window
@@ -125,9 +167,17 @@ impl<'a> Session<'a> {
                 messages: &messages,
                 options: &self.config.options,
             };
-            let reply = self
-                .provider
-                .chat_stream(&req, &mut |delta| on_event(&Event::Delta(delta)))?;
+            let mut first_token: Option<std::time::Instant> = None;
+            let reply = self.provider.chat_stream(&req, &mut |delta| {
+                if first_token.is_none() {
+                    first_token = Some(std::time::Instant::now());
+                }
+                on_event(&Event::Delta(delta))
+            })?;
+            stats.est_tokens += crate::context::estimate_tokens(&reply);
+            if let Some(t) = first_token {
+                stats.gen_secs += t.elapsed().as_secs_f64();
+            }
 
             let parsed = protocol::parse(&reply);
             for block in &parsed.invalid_blocks {
@@ -139,7 +189,7 @@ impl<'a> Session<'a> {
             if parsed.actions.is_empty() {
                 self.history.push(ChatMessage::assistant(reply));
                 on_event(&Event::TurnDone);
-                return Ok(());
+                return Ok(stats);
             }
 
             self.history.push(ChatMessage::assistant(reply));
@@ -185,6 +235,10 @@ impl<'a> Session<'a> {
                     Action::WriteFile { path, .. } | Action::EditFile { path, .. } => {
                         self.context.invalidate_file(path);
                     }
+                    Action::RunCommand { .. } => {
+                        // a command may touch any file - drop all cached contents
+                        self.context.reset();
+                    }
                     _ => {}
                 }
                 on_event(&Event::ToolResult(&output));
@@ -217,9 +271,17 @@ impl<'a> Session<'a> {
             messages: &messages,
             options: &self.config.options,
         };
-        let reply = self
-            .provider
-            .chat_stream(&req, &mut |delta| on_event(&Event::Delta(delta)))?;
+        let mut first_token: Option<std::time::Instant> = None;
+        let reply = self.provider.chat_stream(&req, &mut |delta| {
+            if first_token.is_none() {
+                first_token = Some(std::time::Instant::now());
+            }
+            on_event(&Event::Delta(delta))
+        })?;
+        stats.est_tokens += crate::context::estimate_tokens(&reply);
+        if let Some(t) = first_token {
+            stats.gen_secs += t.elapsed().as_secs_f64();
+        }
         if protocol::parse(&reply).prose.trim().is_empty() {
             on_event(&Event::Info(
                 "[warn] the model produced no final answer text".into(),
@@ -227,7 +289,7 @@ impl<'a> Session<'a> {
         }
         self.history.push(ChatMessage::assistant(reply));
         on_event(&Event::TurnDone);
-        Ok(())
+        Ok(stats)
     }
 }
 
@@ -254,6 +316,11 @@ fn action_signature(action: &Action) -> String {
             replace,
         } => format!("E:{path}:{}:{}", h(search), h(replace)),
         Action::ListDir { path } => format!("L:{path}"),
+        Action::RunCommand {
+            command,
+            cwd,
+            timeout,
+        } => format!("C:{command}:{cwd:?}:{timeout:?}"),
     }
 }
 
@@ -457,5 +524,54 @@ mod tests {
                 && m.content.contains("Tool-call budget is exhausted")
         });
         assert!(told, "final-answer instruction missing from history");
+    }
+
+    #[test]
+    fn manual_compaction_absorbs_history() {
+        let dir = std::env::temp_dir().join("nah_test_manual_compact");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let replies = vec!["ok".to_string()];
+        let mut s = session_with(replies, &dir);
+        // build some history the summary can absorb
+        for i in 0..8 {
+            s.history
+                .push(ChatMessage::user(format!("turn {i} happened")));
+            s.history
+                .push(ChatMessage::assistant(format!("turn {i} done")));
+        }
+        let before = s.history.len();
+        let cut = s.force_compact().unwrap();
+        assert!(cut > 0, "something must be summarized");
+        assert_eq!(s.history.len(), before - cut);
+        assert!(!s.context.summary.is_empty(), "summary must be filled");
+        // usage reflects the shortened history
+        let (tokens, msgs) = s.context_usage();
+        assert_eq!(msgs, s.history.len());
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn turn_stats_accumulate_generated_tokens() {
+        let dir = std::env::temp_dir().join("nah_test_stats");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // one tool call, then a short final answer
+        let replies = vec![
+            "```tool\nLIST_DIR\npath: .\n```".to_string(),
+            "done.".to_string(),
+        ];
+        let mut s = session_with(replies, &dir);
+        let stats = s
+            .run_turn("go", &mut |_: &ConfirmRequest| true, &mut |_| {})
+            .unwrap();
+        // both replies count: the tool block and the final answer
+        let expected = crate::context::estimate_tokens("```tool\nLIST_DIR\npath: .\n```")
+            + crate::context::estimate_tokens("done.");
+        assert_eq!(stats.est_tokens, expected);
+        assert!(stats.gen_secs >= 0.0);
+        // division guard
+        assert_eq!(TurnStats::default().tokens_per_sec(), 0.0);
+        assert!(stats.tokens_per_sec() >= 0.0);
     }
 }
