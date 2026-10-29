@@ -13,7 +13,7 @@ pub fn install() {
     // (println!, exit) could deadlock if the signal lands mid-allocation.
     extern "C" fn handler(_sig: i32) {
         unsafe {
-            write(2, MSG.as_ptr(), MSG.len());
+            write(2, MSG.as_ptr().cast(), MSG.len());
             _exit(0);
         }
     }
@@ -25,7 +25,10 @@ pub fn install() {
 #[cfg(unix)]
 unsafe extern "C" {
     fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
-    fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+    // signature must match the runtime symbol exactly (the std's own
+    // declaration uses *const c_void) or rustc's
+    // suspicious_runtime_symbol_definitions lint fires
+    fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
     fn _exit(code: i32) -> !;
 }
 
