@@ -171,6 +171,7 @@ impl<'a> Repl<'a> {
   /history <n>      number of trailing messages always kept
   /compact          summarize older history now (frees context space)
   /files            show files in the working set
+  /tools            list tools and toggle them on/off (only enabled ones reach the model)
   /root             show the project root
   /yes | /no        toggle auto-approve for file writes and commands
   /reset            clear conversation history and session memory
@@ -318,6 +319,61 @@ impl<'a> Repl<'a> {
                 } else {
                     for f in files {
                         println!("  - {} ({} lines)", f.path, f.content.lines().count());
+                    }
+                }
+            }
+            "tools" => {
+                let mut parts = rest.split_whitespace();
+                match parts.next() {
+                    None => {
+                        self.ui
+                            .info("tools (only enabled ones are shown to the model):");
+                        for def in self.session.tools.registry().all() {
+                            let status = if self.session.tools.registry().enabled(&def.name) {
+                                "on "
+                            } else {
+                                "off"
+                            };
+                            println!("  [{status}] {}", def.name);
+                        }
+                        self.ui
+                            .info("usage: /tools on|off <name>  |  /tools reload");
+                    }
+                    Some(sub @ ("on" | "off")) => {
+                        if let Some(name) = parts.next() {
+                            if self
+                                .session
+                                .tools
+                                .registry_mut()
+                                .set_enabled(name, sub == "on")
+                            {
+                                self.config.disabled_tools =
+                                    self.session.tools.registry().disabled_names().to_vec();
+                                let _ = nah_core::config::save(
+                                    &nah_core::config::config_path(),
+                                    &self.config,
+                                );
+                                self.ui.ok(&format!(
+                                    "tool {} {} - takes effect on the next message",
+                                    name.to_ascii_uppercase(),
+                                    if sub == "on" { "enabled" } else { "disabled" }
+                                ));
+                            } else {
+                                self.ui.info(&format!(
+                                    "unknown tool: {name} (see /tools for the list)"
+                                ));
+                            }
+                        } else {
+                            self.ui.info("usage: /tools on|off <name>");
+                        }
+                    }
+                    Some("reload") => {
+                        self.ui.ok("tools reloaded");
+                    }
+                    Some(other) => {
+                        self.ui.info(&format!(
+                            "unknown subcommand: {other} - usage: /tools [on|off <name>]"
+                        ));
                     }
                 }
             }

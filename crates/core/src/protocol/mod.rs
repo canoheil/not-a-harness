@@ -61,6 +61,13 @@ pub enum Action {
         cwd: Option<String>,
         timeout: Option<u32>,
     },
+    DeleteFile {
+        path: String,
+    },
+    MoveFile {
+        path: String,
+        to: String,
+    },
 }
 
 impl Action {
@@ -71,6 +78,8 @@ impl Action {
             Action::EditFile { .. } => "EDIT_FILE",
             Action::ListDir { .. } => "LIST_DIR",
             Action::RunCommand { .. } => "RUN_COMMAND",
+            Action::DeleteFile { .. } => "DELETE_FILE",
+            Action::MoveFile { .. } => "MOVE_FILE",
         }
     }
 
@@ -79,7 +88,9 @@ impl Action {
             Action::ReadFile { path, .. }
             | Action::WriteFile { path, .. }
             | Action::EditFile { path, .. }
-            | Action::ListDir { path } => path,
+            | Action::ListDir { path }
+            | Action::DeleteFile { path }
+            | Action::MoveFile { path, .. } => path,
             Action::RunCommand { command, .. } => command,
         }
     }
@@ -191,6 +202,8 @@ pub fn action_label(action: &Action) -> String {
             )
         }
         Action::ListDir { path } => format!("LIST_DIR {path}"),
+        Action::DeleteFile { path } => format!("DELETE_FILE {path}"),
+        Action::MoveFile { path, to } => format!("MOVE_FILE {path} -> {to}"),
         Action::RunCommand { command, .. } => {
             let trimmed = command.trim();
             if trimmed.chars().count() > 60 {
@@ -205,65 +218,34 @@ pub fn action_label(action: &Action) -> String {
 
 /// Text shown to the model explaining the protocol. Kept compact on purpose:
 /// context budget is precious on 4K models.
-pub fn tool_protocol_doc() -> &'static str {
-    r#"TOOLS — to use a tool, output a block exactly like these examples:
+/// Prompt document: fixed preamble + a section per visible tool +
+/// rules + worked example. Only enabled tools are documented - a lean
+/// tool list keeps small models out of trouble.
+pub fn tool_protocol_doc(reg: &crate::tools::ToolRegistry) -> String {
+    let mut out =
+        String::from("TOOLS — to use a tool, output a block exactly like these examples:\n\n");
+    for def in reg.visible() {
+        out.push_str(&def.doc);
+        out.push_str("\n\n");
+    }
+    out.push_str(HOW_TO_WORK);
+    out.push_str(RULES_HEAD);
+    out.push_str(&format!(
+        "- Never invent tool names or keys: {}.\n",
+        reg.enabled_names()
+    ));
+    out.push_str(RULES_TAIL);
+    out.push_str(EXAMPLE);
+    out
+}
 
-```tool
-READ_FILE
-path: src/main.rs
-```
-Read a file before editing it. Optional keys: `offset: <first line>`, `limit: <max lines>`.
+const HOW_TO_WORK: &str = "HOW TO WORK\n1. Understand what exists first: explore the project and read files before changing anything.\n2. One fenced block holds exactly one action; you may emit several blocks per reply.\n3. After each action you get a [TOOL RESULTS] message. Read it, then continue with the next step.\n4. Never repeat an action that already succeeded. If a result says the file is unchanged or already correct, move on to the next step.\n5. If a tool returns an error, fix the cause (for example a wrong path) instead of retrying the same call.\n6. When the task is finished, reply to the user in plain text, briefly, with no tool block.\n\n";
 
-```tool
-WRITE_FILE
-path: docs/notes.md
-content:
-<file content, any text>
-END_OF_CONTENT
-```
-Create a file or replace it entirely. For a small change, use EDIT_FILE instead.
+const RULES_HEAD: &str = "RULES\n- Tool calls are ONLY the fenced tool blocks shown above. Never use JSON, XML tags (like `<function>`), or any other format.\n- Never write `[TOOL RESULTS]` or fake tool results - the system sends those messages, you never do.\n- Never claim a step succeeded unless a tool result confirms it; report failures honestly.\n";
 
-```tool
-EDIT_FILE
-path: src/main.rs
-<<<<<<< SEARCH
-<exact text to find — must match one unique place>
-=======
-<replacement text>
->>>>>>> REPLACE
-```
-Change a small part of an existing file. SEARCH must match the file exactly (whitespace included) in exactly one place.
+const RULES_TAIL: &str = "- Do not only describe planned changes — make them with the tools.\n- Paths are relative to the project root.\n- Never write a line containing only END_OF_CONTENT inside file content.\n\n";
 
-```tool
-LIST_DIR
-path: src
-```
-Explore a directory to see what exists.
-
-```tool
-RUN_COMMAND
-command: cargo build --release
-```
-Run a shell command (build, tests, scripts). The user is asked to confirm every command. Optional keys: `cwd: <subdir>`, `timeout: <seconds, max 300>`. Never use it for file changes - use the file tools.
-
-HOW TO WORK
-1. Understand what exists first: use LIST_DIR and READ_FILE before changing anything.
-2. One fenced block holds exactly one action; you may emit several blocks per reply.
-3. After each action you get a [TOOL RESULTS] message. Read it, then continue with the next step.
-4. Never repeat an action that already succeeded. If a result says the file is unchanged or already correct, move on to the next step.
-5. If a tool returns an error, fix the cause (for example a wrong path) instead of retrying the same call.
-6. When the task is finished, reply to the user in plain text, briefly, with no tool block.
-
-RULES
-- Tool calls are ONLY the fenced tool blocks shown above. Never use JSON, XML tags (like `<function>`), or any other format.
-- Never write `[TOOL RESULTS]` or fake tool results - the system sends those messages, you never do.
-- Never claim a step succeeded unless the tool result confirms it; report failures honestly.
-- Never invent tool names or keys: READ_FILE, WRITE_FILE, EDIT_FILE, LIST_DIR, RUN_COMMAND.
-- Do not only describe planned changes — make them with the tools.
-- Paths are relative to the project root.
-- Never write a line containing only END_OF_CONTENT inside file content.
-
-EXAMPLE OF ONE CHANGE
+const EXAMPLE: &str = r#"EXAMPLE OF ONE CHANGE
 User: "fix the greeting in hello.txt"
 Your reply contains a tool block:
 ```tool
@@ -289,8 +271,7 @@ The system replies:
 edited 'hello.txt' in one place.
 --- end ---
 Your final reply is plain text:
-Fixed the greeting in hello.txt."#
-}
+Fixed the greeting in hello.txt."#;
 
 #[cfg(test)]
 mod doc_tests {
@@ -317,7 +298,7 @@ mod doc_tests {
     /// parser - a drifting example teaches weak models the wrong format.
     #[test]
     fn tool_doc_examples_parse() {
-        let p = parse(tool_protocol_doc());
+        let p = parse(&tool_protocol_doc(&crate::tools::ToolRegistry::builtin()));
         assert!(
             p.invalid_blocks.is_empty(),
             "invalid: {:?}",
@@ -325,8 +306,8 @@ mod doc_tests {
         );
         assert_eq!(
             p.actions.len(),
-            7,
-            "expected 5 syntax examples + 2 example-of-change blocks: {:?}",
+            9,
+            "expected 7 syntax examples + 2 example-of-change blocks: {:?}",
             p.actions
         );
         assert!(matches!(p.actions[0], Action::ReadFile { .. }));
@@ -334,7 +315,27 @@ mod doc_tests {
         assert!(matches!(p.actions[2], Action::EditFile { .. }));
         assert!(matches!(p.actions[3], Action::ListDir { .. }));
         assert!(matches!(p.actions[4], Action::RunCommand { .. }));
-        assert!(matches!(p.actions[5], Action::ReadFile { .. }));
-        assert!(matches!(p.actions[6], Action::EditFile { .. }));
+        assert!(matches!(p.actions[5], Action::DeleteFile { .. }));
+        assert!(matches!(p.actions[6], Action::MoveFile { .. }));
+        assert!(matches!(p.actions[7], Action::ReadFile { .. }));
+        assert!(matches!(p.actions[8], Action::EditFile { .. }));
+    }
+
+    /// Only enabled tools reach the prompt - disabling one must drop
+    /// both its section and its name from the rules line.
+    #[test]
+    fn tool_doc_only_lists_enabled_tools() {
+        let mut reg = crate::tools::ToolRegistry::builtin();
+        reg.set_enabled("LIST_DIR", false);
+        reg.set_enabled("MOVE_FILE", false);
+        let doc = tool_protocol_doc(&reg);
+        assert!(!doc.contains("LIST_DIR"), "disabled tool leaked:\n{doc}");
+        assert!(!doc.contains("MOVE_FILE"), "disabled tool leaked:\n{doc}");
+        assert!(doc.contains("READ_FILE"));
+        assert!(doc.contains("DELETE_FILE"));
+        // the teaching line lists exactly the enabled names
+        assert!(!doc.contains(
+            "Never invent tool names or keys: READ_FILE, WRITE_FILE, EDIT_FILE, LIST_DIR"
+        ));
     }
 }
