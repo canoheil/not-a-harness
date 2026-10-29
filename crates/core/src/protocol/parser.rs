@@ -139,30 +139,14 @@ pub fn parse(text: &str) -> ParsedOutput {
                     let key = key.trim();
                     let value = value.trim();
                     match key {
-                        "path" => {
-                            if !value.is_empty() {
-                                path = Some(value.to_string());
-                            }
-                        }
+                        "path" if !value.is_empty() => path = Some(value.to_string()),
                         "offset" => offset = value.parse().ok(),
                         "limit" => limit = value.parse().ok(),
-                        "command" => {
-                            if !value.is_empty() {
-                                command = Some(value.to_string());
-                            }
-                        }
-                        "cwd" => {
-                            if !value.is_empty() {
-                                cmd_cwd = Some(value.to_string());
-                            }
-                        }
+                        "command" if !value.is_empty() => command = Some(value.to_string()),
+                        "cwd" if !value.is_empty() => cmd_cwd = Some(value.to_string()),
                         "timeout" => cmd_timeout = value.parse().ok(),
-                        "to" => {
-                            if !value.is_empty() {
-                                move_to = Some(value.to_string());
-                            }
-                        }
-                        _ => {} // ignore unknown keys, stay tolerant
+                        "to" if !value.is_empty() => move_to = Some(value.to_string()),
+                        _ => {} // unknown or empty keys are ignored, stay tolerant
                     }
                 } else if t.is_empty() {
                     // blank lines between params are fine

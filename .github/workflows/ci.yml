@@ -30,9 +30,9 @@ jobs:
         run: |
           set +e
           cargo clippy --all-targets -- -D warnings > clippy_out.txt 2>&1
-          code=$?
-          echo "::error::clippy exit=$code"
-          awk '{gsub(/%/,"%25"); gsub(/\r/,""); printf "::error::L%d %s\n", NR, $0}' clippy_out.txt | head -40
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          head -c 60000 clippy_out.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Test
         run: cargo test --workspace
