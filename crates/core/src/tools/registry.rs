@@ -28,22 +28,22 @@ pub struct ToolRegistry {
     disabled: Vec<String>,
 }
 
-const DOC_READ: &str = r#"```tool
+const DOC_READ: &str = r"```tool
 READ_FILE
 path: src/main.rs
 ```
-Read a file before editing it. Optional keys: `offset: <first line>`, `limit: <max lines>`."#;
+Read a file before editing it. Optional keys: `offset: <first line>`, `limit: <max lines>`.";
 
-const DOC_WRITE: &str = r#"```tool
+const DOC_WRITE: &str = r"```tool
 WRITE_FILE
 path: docs/notes.md
 content:
 <file content, any text>
 END_OF_CONTENT
 ```
-Create a file or replace it entirely. For a small change, use EDIT_FILE instead."#;
+Create a file or replace it entirely. For a small change, use EDIT_FILE instead.";
 
-const DOC_EDIT: &str = r#"```tool
+const DOC_EDIT: &str = r"```tool
 EDIT_FILE
 path: src/main.rs
 <<<<<<< SEARCH
@@ -52,32 +52,32 @@ path: src/main.rs
 <replacement text>
 >>>>>>> REPLACE
 ```
-Change a small part of an existing file. SEARCH must match the file exactly (whitespace included) in exactly one place."#;
+Change a small part of an existing file. SEARCH must match the file exactly (whitespace included) in exactly one place.";
 
-const DOC_LIST: &str = r#"```tool
+const DOC_LIST: &str = r"```tool
 LIST_DIR
 path: src
 ```
-Explore a directory to see what exists."#;
+Explore a directory to see what exists.";
 
-const DOC_RUN: &str = r#"```tool
+const DOC_RUN: &str = r"```tool
 RUN_COMMAND
 command: cargo build --release
 ```
-Run a shell command (build, tests, scripts). The user is asked to confirm every command. Optional keys: `cwd: <subdir>`, `timeout: <seconds, max 300>`. Never use it for file changes - use the file tools."#;
+Run a shell command (build, tests, scripts). The user is asked to confirm every command. Optional keys: `cwd: <subdir>`, `timeout: <seconds, max 300>`. Never use it for file changes - use the file tools.";
 
-const DOC_DELETE: &str = r#"```tool
+const DOC_DELETE: &str = r"```tool
 DELETE_FILE
 path: old.txt
 ```
-Delete a file. The user is asked to confirm before anything is removed."#;
+Delete a file. The user is asked to confirm before anything is removed.";
 
-const DOC_MOVE: &str = r#"```tool
+const DOC_MOVE: &str = r"```tool
 MOVE_FILE
 path: old.txt
 to: new.txt
 ```
-Move or rename a file. The user is asked to confirm before anything changes."#;
+Move or rename a file. The user is asked to confirm before anything changes.";
 
 impl ToolRegistry {
     /// All built-in tools, all enabled.

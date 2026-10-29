@@ -153,6 +153,57 @@ impl<'a> Repl<'a> {
 
     /// Returns `true` when the REPL should exit. Never fails: command
     /// errors are printed and the session keeps running.
+    /// `/tools [on|off <name>] | reload` - list and toggle the tools the
+    /// model is allowed to see (disabled ones leave the prompt entirely).
+    fn handle_tools(&mut self, rest: &str) {
+        let mut parts = rest.split_whitespace();
+        match parts.next() {
+            None => self.list_tools(),
+            Some("on") => self.toggle_tool(true, parts.next()),
+            Some("off") => self.toggle_tool(false, parts.next()),
+            Some("reload") => self.ui.ok("tools reloaded"),
+            Some(other) => {
+                self.ui.info(&format!(
+                    "unknown subcommand: {other} - usage: /tools [on|off <name>]"
+                ));
+            }
+        }
+    }
+
+    fn list_tools(&self) {
+        self.ui
+            .info("tools (only enabled ones are shown to the model):");
+        for def in self.session.tools.registry().all() {
+            let status = if self.session.tools.registry().enabled(&def.name) {
+                "on "
+            } else {
+                "off"
+            };
+            println!("  [{status}] {}", def.name);
+        }
+        self.ui
+            .info("usage: /tools on|off <name>  |  /tools reload");
+    }
+
+    fn toggle_tool(&mut self, on: bool, name: Option<&str>) {
+        let Some(name) = name else {
+            self.ui.info("usage: /tools on|off <name>");
+            return;
+        };
+        if !self.session.tools.registry_mut().set_enabled(name, on) {
+            self.ui
+                .info(&format!("unknown tool: {name} (see /tools for the list)"));
+            return;
+        }
+        self.config.disabled_tools = self.session.tools.registry().disabled_names().to_vec();
+        let _ = nah_core::config::save(&nah_core::config::config_path(), &self.config);
+        self.ui.ok(&format!(
+            "tool {} {} - takes effect on the next message",
+            name.to_ascii_uppercase(),
+            if on { "enabled" } else { "disabled" }
+        ));
+    }
+
     fn handle_command(&mut self, cmd: &str) -> bool {
         let (name, rest) = match cmd.split_once(' ') {
             Some((n, r)) => (n, r.trim()),
@@ -162,7 +213,7 @@ impl<'a> Repl<'a> {
             "exit" | "quit" | "q" => return true,
             "help" | "h" | "?" => {
                 println!(
-                    r#"commands:
+                    r"commands:
   /setup            run the setup wizard (provider, URL, default model)
   /provider         scan for local model servers and switch to one
   /models           list models available on the server
@@ -178,7 +229,7 @@ impl<'a> Repl<'a> {
   /clear            clear the screen (aliases: cls, bare `clear`)
   /status           show current settings and context usage
   /exit             quit (Ctrl+C also exits)
-  (anything else is sent to the model as-is)"#
+  (anything else is sent to the model as-is)"
                 );
             }
             "setup" => {
@@ -322,61 +373,7 @@ impl<'a> Repl<'a> {
                     }
                 }
             }
-            "tools" => {
-                let mut parts = rest.split_whitespace();
-                match parts.next() {
-                    None => {
-                        self.ui
-                            .info("tools (only enabled ones are shown to the model):");
-                        for def in self.session.tools.registry().all() {
-                            let status = if self.session.tools.registry().enabled(&def.name) {
-                                "on "
-                            } else {
-                                "off"
-                            };
-                            println!("  [{status}] {}", def.name);
-                        }
-                        self.ui
-                            .info("usage: /tools on|off <name>  |  /tools reload");
-                    }
-                    Some(sub @ ("on" | "off")) => {
-                        if let Some(name) = parts.next() {
-                            if self
-                                .session
-                                .tools
-                                .registry_mut()
-                                .set_enabled(name, sub == "on")
-                            {
-                                self.config.disabled_tools =
-                                    self.session.tools.registry().disabled_names().to_vec();
-                                let _ = nah_core::config::save(
-                                    &nah_core::config::config_path(),
-                                    &self.config,
-                                );
-                                self.ui.ok(&format!(
-                                    "tool {} {} - takes effect on the next message",
-                                    name.to_ascii_uppercase(),
-                                    if sub == "on" { "enabled" } else { "disabled" }
-                                ));
-                            } else {
-                                self.ui.info(&format!(
-                                    "unknown tool: {name} (see /tools for the list)"
-                                ));
-                            }
-                        } else {
-                            self.ui.info("usage: /tools on|off <name>");
-                        }
-                    }
-                    Some("reload") => {
-                        self.ui.ok("tools reloaded");
-                    }
-                    Some(other) => {
-                        self.ui.info(&format!(
-                            "unknown subcommand: {other} - usage: /tools [on|off <name>]"
-                        ));
-                    }
-                }
-            }
+            "tools" => self.handle_tools(rest),
             "root" => {
                 self.ui.info(&format!(
                     "project root: {}",
