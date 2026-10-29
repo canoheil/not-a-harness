@@ -302,10 +302,16 @@ impl Ui {
         self.line_colored(MAGENTA, &format!("tool: {label}"));
     }
 
+    /// Quiet status line (dim) - context usage and similar telemetry.
+    pub fn stat(&self, text: &str) {
+        self.touch();
+        self.line_colored(DIM, text);
+    }
+
     pub fn tool_ok(&self, body: &str) {
         self.stream_flush();
         self.touch();
-        for line in body.lines().take(12) {
+        for line in body.lines().filter(|l| !l.trim().is_empty()).take(12) {
             self.line_colored(DIM, &format!("| {line}"));
         }
     }
@@ -313,7 +319,7 @@ impl Ui {
     pub fn tool_err(&self, body: &str) {
         self.stream_flush();
         self.touch();
-        for line in body.lines().take(12) {
+        for line in body.lines().filter(|l| !l.trim().is_empty()).take(12) {
             self.line_colored(RED, &format!("| {line}"));
         }
     }

@@ -1,5 +1,6 @@
 //! `nah` - terminal front-end.
 
+mod ctrlc;
 mod repl;
 mod setup;
 mod spinner;
@@ -14,6 +15,7 @@ use nah_core::provider;
 use ui::Ui;
 
 fn main() {
+    ctrlc::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // pre-pass: strip flags handled here (-p/--prompt, --setup)

@@ -80,6 +80,26 @@ impl<'a> Session<'a> {
         self.pinned_task = None;
     }
 
+    /// Approximate context usage for the UI: (tokens, messages).
+    pub fn context_usage(&self) -> (usize, usize) {
+        (
+            self.context.estimate_usage(&self.history),
+            self.history.len(),
+        )
+    }
+
+    /// Manually trigger history summarization (/compact). Returns the
+    /// number of messages absorbed into the rolling summary.
+    pub fn force_compact(&mut self) -> Result<usize, CoreError> {
+        let cut =
+            self.context
+                .compact(self.provider.as_mut(), &self.config.model, &self.history)?;
+        if cut > 0 {
+            self.history.drain(..cut);
+        }
+        Ok(cut)
+    }
+
     /// Run one user turn to completion (or until max_steps).
     pub fn run_turn(
         &mut self,
@@ -466,5 +486,30 @@ mod tests {
                 && m.content.contains("Tool-call budget is exhausted")
         });
         assert!(told, "final-answer instruction missing from history");
+    }
+
+    #[test]
+    fn manual_compaction_absorbs_history() {
+        let dir = std::env::temp_dir().join("nah_test_manual_compact");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let replies = vec!["ok".to_string()];
+        let mut s = session_with(replies, &dir);
+        // build some history the summary can absorb
+        for i in 0..8 {
+            s.history
+                .push(ChatMessage::user(format!("turn {i} happened")));
+            s.history
+                .push(ChatMessage::assistant(format!("turn {i} done")));
+        }
+        let before = s.history.len();
+        let cut = s.force_compact().unwrap();
+        assert!(cut > 0, "something must be summarized");
+        assert_eq!(s.history.len(), before - cut);
+        assert!(!s.context.summary.is_empty(), "summary must be filled");
+        // usage reflects the shortened history
+        let (tokens, msgs) = s.context_usage();
+        assert_eq!(msgs, s.history.len());
+        assert!(tokens > 0);
     }
 }

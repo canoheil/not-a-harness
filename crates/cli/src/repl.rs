@@ -125,6 +125,12 @@ impl<'a> Repl<'a> {
             self.ui.spinner_off();
             self.ui.stream_flush();
             self.ui.error(&e.to_string());
+        } else {
+            let (tokens, msgs) = self.session.context_usage();
+            self.ui.stat(&format!(
+                "context: ~{}/{} tokens - {} messages  (/compact summarizes)",
+                tokens, self.config.ctx_tokens, msgs
+            ));
         }
     }
 
@@ -145,12 +151,13 @@ impl<'a> Repl<'a> {
   /model <name>     switch the model
   /ctx <n>          set the context budget (and num_ctx)
   /history <n>      number of trailing messages always kept
+  /compact          summarize older history now (frees context space)
   /files            show files in the working set
   /root             show the project root
-  /yes | /no        toggle auto-approve for file writes
+  /yes | /no        toggle auto-approve for file writes and commands
   /reset            clear conversation history and session memory
-  /status           show current settings
-  /exit             quit
+  /status           show current settings and context usage
+  /exit             quit (Ctrl+C also exits)
   (anything else is sent to the model as-is)"#
                 );
             }
@@ -231,25 +238,43 @@ impl<'a> Repl<'a> {
             }
             "yes" => {
                 self.config.auto_approve = true;
-                self.ui.ok("file writes will be auto-approved.");
+                self.ui
+                    .ok("file writes and command runs will be auto-approved.");
             }
             "no" => {
                 self.config.auto_approve = false;
-                self.ui.ok("file writes now require confirmation.");
+                self.ui
+                    .ok("file writes and command runs now require confirmation.");
             }
+            "compact" => match self.session.force_compact() {
+                Ok(0) => self.ui.info("nothing to compact yet."),
+                Ok(n) => {
+                    self.ui.ok(&format!("summarized {n} older message(s)."));
+                    let (tokens, msgs) = self.session.context_usage();
+                    self.ui.stat(&format!(
+                        "context: ~{}/{} tokens - {} messages",
+                        tokens, self.config.ctx_tokens, msgs
+                    ));
+                }
+                Err(e) => self.ui.error(&e.to_string()),
+            },
             "reset" => {
                 self.session.reset();
                 self.ui.ok("session cleared.");
             }
             "status" => {
+                let (tokens, msgs) = self.session.context_usage();
                 println!(
-                    "  model: {} | server: {} | provider: {}\n  ctx: {} | history: {} | auto-approve: {}",
+                    "  model: {} | provider: {} | server: {}\n  ctx: {} tokens (~{} used, {} messages) | history: {} | auto-approve: {}\n  root: {}",
                     self.config.model,
-                    self.config.url,
                     self.config.provider.as_str(),
+                    self.config.url,
                     self.config.ctx_tokens,
+                    tokens,
+                    msgs,
                     self.config.history_messages,
-                    if self.config.auto_approve { "on" } else { "off" }
+                    if self.config.auto_approve { "on" } else { "off" },
+                    self.session.tools.root().display()
                 );
             }
             other => {
