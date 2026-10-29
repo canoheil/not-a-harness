@@ -158,6 +158,7 @@ impl<'a> Repl<'a> {
                 println!(
                     r#"commands:
   /setup            run the setup wizard (provider, URL, default model)
+  /provider         scan for local model servers and switch to one
   /models           list models available on the server
   /model <name>     switch the model
   /ctx <n>          set the context budget (and num_ctx)
@@ -186,6 +187,35 @@ impl<'a> Repl<'a> {
                             .ui
                             .error(&format!("saved config, but reconnect failed: {e}")),
                     }
+                }
+            }
+            "provider" => {
+                match setup::configure_connection(&self.ui, &mut self.config) {
+                    Ok(models) => {
+                        setup::choose_model(&self.ui, &mut self.config, &models);
+                        if let Err(e) =
+                            nah_core::config::save(&nah_core::config::config_path(), &self.config)
+                        {
+                            self.ui.error(&e.to_string());
+                        }
+                        // reconnect: URL or provider kind may have changed
+                        match nah_core::provider::connect(self.config.provider, &self.config.url) {
+                            Ok(p) => {
+                                self.session.provider = p;
+                                self.sync_session_config();
+                                self.ui.ok(&format!(
+                                    "connected to {} at {} with model '{}'",
+                                    self.config.provider.as_str(),
+                                    self.config.url,
+                                    self.config.model
+                                ));
+                            }
+                            Err(e) => self
+                                .ui
+                                .error(&format!("saved config, but reconnect failed: {e}")),
+                        }
+                    }
+                    Err(e) => self.ui.error(&e.to_string()),
                 }
             }
             "models" => match self.session.provider.list_models() {

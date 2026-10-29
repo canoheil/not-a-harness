@@ -144,6 +144,27 @@ const BLUE: &str = "\x1b[34m";
 const MAGENTA: &str = "\x1b[35m";
 const CYAN: &str = "\x1b[36m";
 
+/// The startup mascot: a little horse saying "nah!".
+const MASCOT: [&str; 5] = [
+    "       /\\  /\\",
+    "      /  \\/  \\___",
+    "   ~ | •    •   )   nah!",
+    "    ~ \\  ▽   __/",
+    "     ~  \\____/",
+];
+/// Width of the widest mascot row.
+const MASCOT_WIDTH: usize = 24;
+
+/// Mascot rows for the startup banner. Narrow terminals get a plain
+/// wordmark instead of the art.
+pub fn mascot_rows(width: usize) -> Vec<&'static str> {
+    if width >= MASCOT_WIDTH + 2 {
+        MASCOT.to_vec()
+    } else {
+        vec!["nah!"]
+    }
+}
+
 impl Ui {
     pub fn new(color: bool, width: Option<usize>) -> Ui {
         if color {
@@ -272,10 +293,10 @@ impl Ui {
     // ------------------------------------------------------------------
 
     pub fn banner(&self) {
-        println!(
-            "{}",
-            self.paint(BLUE, &format!("{}{}", BOLD, "nah - not-a-harness"))
-        );
+        // startup mascot: a small horse + the "nah!" wordmark
+        for row in mascot_rows(self.width) {
+            println!("{}", self.paint(&format!("{BOLD}{BLUE}"), row));
+        }
         self.line_colored(DIM, "lean local-LLM agent harness - text tool protocol");
         self.line_colored(DIM, "type /help for commands, /exit to quit");
         println!();
@@ -737,5 +758,19 @@ mod tests {
         let mut f = ToolBlockFilter::new();
         let out = f.push("look:\n```rust\nfn main() {}\n```\nend\n");
         assert_eq!(out, "look:\n```rust\nfn main() {}\n```\nend\n");
+    }
+
+    #[test]
+    fn mascot_fits_normal_terminals() {
+        let rows = mascot_rows(80);
+        assert_eq!(rows.len(), 5);
+        assert!(rows[2].ends_with("nah!"));
+        // art must never exceed its documented width
+        assert!(rows.iter().all(|r| r.chars().count() <= MASCOT_WIDTH));
+    }
+
+    #[test]
+    fn mascot_falls_back_when_narrow() {
+        assert_eq!(mascot_rows(20), vec!["nah!"]);
     }
 }
