@@ -79,6 +79,12 @@ impl<'a> Repl<'a> {
                 }
                 continue;
             }
+            // terminal habit: bare `clear`/`cls` clears the screen instead
+            // of going to the model
+            if trimmed.eq_ignore_ascii_case("clear") || trimmed.eq_ignore_ascii_case("cls") {
+                self.ui.clear_screen();
+                continue;
+            }
 
             self.run_turn(trimmed);
         }
@@ -168,12 +174,18 @@ impl<'a> Repl<'a> {
   /root             show the project root
   /yes | /no        toggle auto-approve for file writes and commands
   /reset            clear conversation history and session memory
+  /clear            clear the screen (aliases: cls, bare `clear`)
   /status           show current settings and context usage
   /exit             quit (Ctrl+C also exits)
   (anything else is sent to the model as-is)"#
                 );
             }
             "setup" => {
+                let before = (
+                    self.config.provider,
+                    self.config.url.clone(),
+                    self.config.model.clone(),
+                );
                 if let Err(e) = setup::run(&self.ui, &mut self.config) {
                     self.ui.error(&e.to_string());
                 } else {
@@ -181,6 +193,19 @@ impl<'a> Repl<'a> {
                     match nah_core::provider::connect(self.config.provider, &self.config.url) {
                         Ok(p) => {
                             self.session.provider = p;
+                            let changed = before
+                                != (
+                                    self.config.provider,
+                                    self.config.url.clone(),
+                                    self.config.model.clone(),
+                                );
+                            if changed {
+                                // a different model/server should not see
+                                // the old conversation
+                                self.session.reset();
+                                self.ui
+                                    .info("conversation reset (model or server changed).");
+                            }
                             self.sync_session_config();
                         }
                         Err(e) => self
@@ -190,6 +215,11 @@ impl<'a> Repl<'a> {
                 }
             }
             "provider" => {
+                let before = (
+                    self.config.provider,
+                    self.config.url.clone(),
+                    self.config.model.clone(),
+                );
                 match setup::configure_connection(&self.ui, &mut self.config) {
                     Ok(models) => {
                         setup::choose_model(&self.ui, &mut self.config, &models);
@@ -202,12 +232,24 @@ impl<'a> Repl<'a> {
                         match nah_core::provider::connect(self.config.provider, &self.config.url) {
                             Ok(p) => {
                                 self.session.provider = p;
+                                let changed = before
+                                    != (
+                                        self.config.provider,
+                                        self.config.url.clone(),
+                                        self.config.model.clone(),
+                                    );
+                                if changed {
+                                    // a different model/server should not
+                                    // see the old conversation
+                                    self.session.reset();
+                                }
                                 self.sync_session_config();
                                 self.ui.ok(&format!(
-                                    "connected to {} at {} with model '{}'",
+                                    "connected to {} at {} with model '{}'{}",
                                     self.config.provider.as_str(),
                                     self.config.url,
-                                    self.config.model
+                                    self.config.model,
+                                    if changed { " - conversation reset" } else { "" }
                                 ));
                             }
                             Err(e) => self
@@ -226,14 +268,22 @@ impl<'a> Repl<'a> {
                 }
                 Err(e) => self.ui.error(&e.to_string()),
             },
+            "clear" | "cls" => {
+                self.ui.clear_screen();
+            }
             "model" => {
                 if rest.is_empty() {
                     self.ui
                         .info(&format!("current model: {}", self.config.model));
+                } else if rest == self.config.model {
+                    self.ui.info(&format!("model is already {rest}"));
                 } else {
                     self.config.model = rest.to_string();
+                    // a different model should not see the old conversation
+                    self.session.reset();
                     self.session.config.model = rest.to_string();
-                    self.ui.ok(&format!("model set to {rest}"));
+                    self.ui
+                        .ok(&format!("model set to {rest} - conversation reset"));
                 }
             }
             "ctx" => {
@@ -274,7 +324,7 @@ impl<'a> Repl<'a> {
             "root" => {
                 self.ui.info(&format!(
                     "project root: {}",
-                    self.session.tools.root().display()
+                    nah_core::tools::display_path(self.session.tools.root())
                 ));
             }
             "yes" => {
@@ -315,7 +365,7 @@ impl<'a> Repl<'a> {
                     msgs,
                     self.config.history_messages,
                     if self.config.auto_approve { "on" } else { "off" },
-                    self.session.tools.root().display()
+                    nah_core::tools::display_path(self.session.tools.root())
                 );
             }
             other => {

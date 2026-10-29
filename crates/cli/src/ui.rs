@@ -29,21 +29,33 @@ use crate::wrap::{terminal_width, wrap_line, WordWrapper};
 pub struct ToolBlockFilter {
     hold: String,
     in_block: bool,
+    in_xml: bool,
+    xml_hidden: usize,
     saw_kind: bool,
     is_write: bool,
     in_content: bool,
     seen_eoc: bool,
+    last_out: String,
+    out_reps: usize,
 }
+
+/// Longest `<function>` region we hide before assuming the model forgot
+/// its closing tag and letting the rest of the message through.
+const XML_HIDE_CAP: usize = 40;
 
 impl ToolBlockFilter {
     pub fn new() -> ToolBlockFilter {
         ToolBlockFilter {
             hold: String::new(),
             in_block: false,
+            in_xml: false,
+            xml_hidden: 0,
             saw_kind: false,
             is_write: false,
             in_content: false,
             seen_eoc: false,
+            last_out: String::new(),
+            out_reps: 0,
         }
     }
 
@@ -60,20 +72,34 @@ impl ToolBlockFilter {
             }
         }
         // decide about the partial remainder: hold anything that could
-        // still grow into a fence line, emit the rest immediately
+        // still grow into a fence/marker line, emit the rest immediately
         let rem = self.hold.trim_end_matches('\r');
         if rem.is_empty() {
             // nothing pending
-        } else if self.in_block {
-            // inside a block everything is hidden; keep the partial line
-            // buffered in case it is the (possibly split) closing fence
+        } else if self.in_block || self.in_xml {
+            // inside a hidden region; keep the partial line
+            // buffered in case it is the (possibly split) closer
         } else {
             let t = rem.trim_end();
-            if "```tool".starts_with(t) || "```".starts_with(t) {
-                // could become a fence - wait for more
+            if needs_hold(t) {
+                // could become a fence/marker/xml line - wait for more
             } else {
                 out.push_str(rem);
                 self.hold.clear();
+            }
+        }
+        // runaway-repetition guard: identical streamed chunks again and
+        // again = the model is degenerating; drop the repeats
+        if !out.is_empty() {
+            let body = out.trim();
+            if !body.is_empty() && out == self.last_out {
+                self.out_reps += 1;
+                if self.out_reps >= 3 && body.chars().count() >= 8 {
+                    return String::new();
+                }
+            } else {
+                self.last_out = out.clone();
+                self.out_reps = 1;
             }
         }
         out
@@ -99,16 +125,35 @@ impl ToolBlockFilter {
                 self.in_block = false;
             }
             false
+        } else if self.in_xml {
+            self.xml_hidden += 1;
+            if t.contains("</function>") || self.xml_hidden >= XML_HIDE_CAP {
+                self.in_xml = false;
+            }
+            if !self.in_xml && t == "```tool" {
+                self.start_fence();
+            }
+            false
         } else if t == "```tool" {
-            self.in_block = true;
-            self.saw_kind = false;
-            self.is_write = false;
-            self.in_content = false;
-            self.seen_eoc = false;
+            self.start_fence();
+            false
+        } else if t.trim_start().starts_with("<function") {
+            // XML function call (a common prior in non-coder models) -
+            // hide it like a tool block; single-line calls close at once
+            self.in_xml = !t.contains("</function>");
+            self.xml_hidden = 1;
             false
         } else {
-            true
+            !nah_core::protocol::is_internal_marker(line)
         }
+    }
+
+    fn start_fence(&mut self) {
+        self.in_block = true;
+        self.saw_kind = false;
+        self.is_write = false;
+        self.in_content = false;
+        self.seen_eoc = false;
     }
 
     /// End of a model message: emit any held partial line and reset.
@@ -122,8 +167,23 @@ impl ToolBlockFilter {
             }
         }
         self.in_block = false;
+        self.in_xml = false;
         out
     }
+}
+
+/// Should a partial line stay buffered? True when it could still grow
+/// into - or already is - a fence, an internal marker, or a `<function>`
+/// call line. The symmetric check matters: token-sized deltas split those
+/// lines mid-way, and the pieces must not leak to the screen.
+fn needs_hold(t: &str) -> bool {
+    let s = t.trim_start();
+    let overlaps = |target: &str| target.starts_with(s) || s.starts_with(target);
+    overlaps("```tool")
+        || overlaps("```")
+        || overlaps("[TOOL RESULTS]")
+        || overlaps("--- end ---")
+        || overlaps("<function")
 }
 
 pub struct Ui {
@@ -226,6 +286,20 @@ impl Ui {
         for l in wrap_line(text, self.width) {
             println!("{l}");
         }
+    }
+
+    /// Clear the terminal screen (best-effort across consoles).
+    pub fn clear_screen(&self) {
+        self.touch();
+        if self.color {
+            // ANSI erase + home; Windows Terminal / VT-aware conhost handle it
+            print!("\x1b[2J\x1b[H");
+        } else {
+            for _ in 0..24 {
+                println!();
+            }
+        }
+        flush();
     }
 
     /// Print one pre-colored logical line (color codes excluded from wrap).
@@ -772,5 +846,96 @@ mod tests {
     #[test]
     fn mascot_falls_back_when_narrow() {
         assert_eq!(mascot_rows(20), vec!["nah!"]);
+    }
+
+    #[test]
+    fn filter_hides_xml_function_calls() {
+        let mut f = ToolBlockFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.push("Hello.\n"));
+        out.push_str(&f.push("<function name=\"READ_FILE\">path: a.txt</param></function>\n"));
+        out.push_str(&f.push("Bye.\n"));
+        out.push_str(&f.flush());
+        assert_eq!(out, "Hello.\nBye.\n");
+    }
+
+    #[test]
+    fn filter_hides_multiline_xml_call_until_close() {
+        let mut f = ToolBlockFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.push("<function name=\"EDIT_FILE\"> path: a.txt\n"));
+        out.push_str(&f.push("<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n"));
+        out.push_str(&f.push("Done?\n"));
+        out.push_str(&f.push("</function>\n"));
+        out.push_str(&f.push("Done.\n"));
+        out.push_str(&f.flush());
+        assert_eq!(out, "Done.\n");
+    }
+
+    #[test]
+    fn filter_drops_marker_lines_even_split_across_deltas() {
+        let mut f = ToolBlockFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.push("ok\n"));
+        out.push_str(&f.push("[TOOL RE"));
+        out.push_str(&f.push("SULTS]\n"));
+        out.push_str(&f.push("more\n"));
+        out.push_str(&f.push("--- end ---\n"));
+        out.push_str(&f.push("end\n"));
+        out.push_str(&f.flush());
+        assert_eq!(out, "ok\nmore\nend\n");
+    }
+
+    #[test]
+    fn filter_collapses_runaway_repetition() {
+        let mut f = ToolBlockFilter::new();
+        let mut out = String::new();
+        for _ in 0..6 {
+            out.push_str(&f.push("not-a-harness/Contents/Resources/Resources\n"));
+        }
+        out.push_str(&f.push("tail\n"));
+        out.push_str(&f.flush());
+        // two repeats shown, the rest dropped
+        assert_eq!(
+            out,
+            "not-a-harness/Contents/Resources/Resources\nnot-a-harness/Contents/Resources/Resources\ntail\n"
+        );
+    }
+
+    #[test]
+    fn filter_keeps_short_identical_lines() {
+        // closing braces repeating is normal code, not degeneration
+        let mut f = ToolBlockFilter::new();
+        let mut out = String::new();
+        for _ in 0..4 {
+            out.push_str(&f.push("}\n"));
+        }
+        out.push_str(&f.flush());
+        assert_eq!(out, "}\n}\n}\n}\n");
+    }
+
+    #[test]
+    fn filter_hides_xml_call_split_mid_line() {
+        // real providers stream token-sized deltas that split lines anywhere
+        let mut f = ToolBlockFilter::new();
+        let mut out = String::new();
+        let text = "Hi.\n<function name=\"WRITE_FILE\">path: a.txt\ncontent:\nx\nEND_OF_CONTENT\n</function>\nBye.\n";
+        for chunk in text.as_bytes().chunks(5) {
+            out.push_str(&f.push(std::str::from_utf8(chunk).unwrap()));
+        }
+        out.push_str(&f.flush());
+        assert_eq!(out, "Hi.\nBye.\n");
+    }
+
+    #[test]
+    fn filter_hides_marker_split_mid_line() {
+        let mut f = ToolBlockFilter::new();
+        let mut out = String::new();
+        let text = "ok\n[TOOL RESULTS]\nfine\n--- end ---\ndone\n";
+        for chunk in text.as_bytes().chunks(3) {
+            out.push_str(&f.push(std::str::from_utf8(chunk).unwrap()));
+        }
+        out.push_str(&f.flush());
+        assert_eq!(out, "ok\nfine\ndone\n");
     }
 }
