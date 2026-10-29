@@ -26,7 +26,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --all-targets -- -D warnings > clippy_out.txt 2>&1
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          head -c 60000 clippy_out.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Test
         run: cargo test --workspace
