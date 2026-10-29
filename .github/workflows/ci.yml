@@ -30,9 +30,11 @@ jobs:
         run: |
           set +e
           cargo clippy --all-targets -- -D warnings > clippy_out.txt 2>&1
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          head -c 60000 clippy_out.txt >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E "^error|^ *-->|^ *= note|^help" clippy_out.txt | head -60 | while IFS= read -r line; do
+            esc=${line//'%'/'%25'}
+            esc=${esc//$'\r'/'%0D'}
+            echo "::error::${esc}"
+          done
 
       - name: Test
         run: cargo test --workspace
