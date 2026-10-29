@@ -26,7 +26,16 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          set +e
+          cargo clippy --all-targets -- -D warnings > /tmp/clippy.out 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            while IFS= read -r line; do
+              echo "::error::CLIPPY: ${line}"
+            done < <(head -40 /tmp/clippy.out)
+          fi
+          exit $code
 
       - name: Test
         run: cargo test --workspace
