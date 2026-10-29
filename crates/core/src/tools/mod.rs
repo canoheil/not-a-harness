@@ -418,8 +418,12 @@ impl ToolKit {
         cmd.arg(command).current_dir(&dir).stdin(Stdio::null());
 
         // Capture output via temp files, not pipes: a killed shell's
-        // grandchildren must never block us waiting for pipe EOF.
-        let stamp = std::process::id();
+        // grandchildren must never block us waiting for pipe EOF. Names
+        // are unique per call (atomic counter) so concurrent runs - even
+        // inside one process, as tests do - cannot collide.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stamp = format!("{}_{}", std::process::id(), n);
         let out_path = std::env::temp_dir().join(format!("nah_cmd_out_{stamp}"));
         let err_path = std::env::temp_dir().join(format!("nah_cmd_err_{stamp}"));
         let out_file =
