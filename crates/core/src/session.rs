@@ -352,6 +352,7 @@ fn action_signature(action: &Action) -> String {
         Action::ListDir { path } => format!("L:{path}"),
         Action::DeleteFile { path } => format!("D:{path}"),
         Action::MoveFile { path, to } => format!("M:{path}->{to}"),
+        Action::Custom { name, params } => format!("X:{name}:{params:?}"),
         Action::RunCommand {
             command,
             cwd,

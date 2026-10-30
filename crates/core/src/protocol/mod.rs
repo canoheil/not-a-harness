@@ -68,18 +68,24 @@ pub enum Action {
         path: String,
         to: String,
     },
+    /// A user-defined tool call: free-form name + `key: value` params.
+    Custom {
+        name: String,
+        params: Vec<(String, String)>,
+    },
 }
 
 impl Action {
-    pub fn verb(&self) -> &'static str {
+    pub fn verb(&self) -> String {
         match self {
-            Action::ReadFile { .. } => "READ_FILE",
-            Action::WriteFile { .. } => "WRITE_FILE",
-            Action::EditFile { .. } => "EDIT_FILE",
-            Action::ListDir { .. } => "LIST_DIR",
-            Action::RunCommand { .. } => "RUN_COMMAND",
-            Action::DeleteFile { .. } => "DELETE_FILE",
-            Action::MoveFile { .. } => "MOVE_FILE",
+            Action::ReadFile { .. } => "READ_FILE".to_string(),
+            Action::WriteFile { .. } => "WRITE_FILE".to_string(),
+            Action::EditFile { .. } => "EDIT_FILE".to_string(),
+            Action::ListDir { .. } => "LIST_DIR".to_string(),
+            Action::RunCommand { .. } => "RUN_COMMAND".to_string(),
+            Action::DeleteFile { .. } => "DELETE_FILE".to_string(),
+            Action::MoveFile { .. } => "MOVE_FILE".to_string(),
+            Action::Custom { name, .. } => name.clone(),
         }
     }
 
@@ -92,6 +98,7 @@ impl Action {
             | Action::DeleteFile { path }
             | Action::MoveFile { path, .. } => path,
             Action::RunCommand { command, .. } => command,
+            Action::Custom { .. } => "",
         }
     }
 }
@@ -204,6 +211,10 @@ pub fn action_label(action: &Action) -> String {
         Action::ListDir { path } => format!("LIST_DIR {path}"),
         Action::DeleteFile { path } => format!("DELETE_FILE {path}"),
         Action::MoveFile { path, to } => format!("MOVE_FILE {path} -> {to}"),
+        Action::Custom { name, params } => {
+            let args: Vec<String> = params.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+            format!("{name} {}", args.join(", "))
+        }
         Action::RunCommand { command, .. } => {
             let trimmed = command.trim();
             if trimmed.chars().count() > 60 {

@@ -12,6 +12,7 @@
 
 pub mod diff;
 
+pub mod custom;
 pub mod registry;
 
 pub use registry::{ToolDef, ToolKind, ToolRegistry};
@@ -26,7 +27,7 @@ use crate::protocol::Action;
 
 /// What the harness wants the user to confirm before it touches a file.
 pub struct ConfirmRequest {
-    pub verb: &'static str,
+    pub verb: String,
     pub path: String,
     pub preview: String,
     pub is_new_file: bool,
@@ -34,7 +35,7 @@ pub struct ConfirmRequest {
 
 /// A tool result destined for the model (and the log).
 pub struct ToolOutput {
-    pub verb: &'static str,
+    pub verb: String,
     pub path: String,
     pub body: String,
     pub is_error: bool,
@@ -147,20 +148,22 @@ impl ToolKit {
         confirm: &mut dyn FnMut(&ConfirmRequest) -> bool,
     ) -> ToolOutput {
         let verb = action.verb();
-        if !self.registry.enabled(verb) {
+        if !self.registry.enabled(&verb) {
+            let body = format!(
+                "tool '{verb}' is disabled - enabled tools: {}",
+                self.registry.enabled_names()
+            );
             return ToolOutput {
                 verb,
                 path: action.path().to_string(),
-                body: format!(
-                    "tool '{verb}' is disabled - enabled tools: {}",
-                    self.registry.enabled_names()
-                ),
+                body,
                 is_error: true,
                 changed: false,
             };
         }
         let path = action.path().to_string();
         let result = match action {
+            Action::Custom { name, params } => return self.run_custom(name, params, confirm),
             Action::ReadFile {
                 path,
                 offset,
@@ -289,7 +292,7 @@ impl ToolKit {
             }
             let preview = format!("{warn}{}", diff::render(&old, &content));
             let approved = confirm(&ConfirmRequest {
-                verb: "WRITE_FILE",
+                verb: "WRITE_FILE".into(),
                 path: rel.to_string(),
                 preview,
                 is_new_file: false,
@@ -301,7 +304,7 @@ impl ToolKit {
             }
         } else {
             let approved = confirm(&ConfirmRequest {
-                verb: "WRITE_FILE",
+                verb: "WRITE_FILE".into(),
                 path: rel.to_string(),
                 preview: format!("{warn}{}", diff::render("", &content)),
                 is_new_file: true,
@@ -378,7 +381,7 @@ impl ToolKit {
             diff::render(&old, &new)
         );
         let approved = confirm(&ConfirmRequest {
-            verb: "EDIT_FILE",
+            verb: "EDIT_FILE".into(),
             path: rel.to_string(),
             preview,
             is_new_file: false,
@@ -427,7 +430,7 @@ impl ToolKit {
             preview = format!("{w}\n\n{preview}");
         }
         let approved = confirm(&ConfirmRequest {
-            verb: "DELETE_FILE",
+            verb: "DELETE_FILE".into(),
             path: rel.to_string(),
             preview,
             is_new_file: false,
@@ -478,7 +481,7 @@ impl ToolKit {
             preview = format!("{w}\n\n{preview}");
         }
         let approved = confirm(&ConfirmRequest {
-            verb: "MOVE_FILE",
+            verb: "MOVE_FILE".into(),
             path: rel.to_string(),
             preview,
             is_new_file: false,
@@ -570,7 +573,7 @@ impl ToolKit {
             preview.push_str("\n! warning: this command looks destructive");
         }
         let request = ConfirmRequest {
-            verb: "RUN_COMMAND",
+            verb: "RUN_COMMAND".into(),
             path: command.to_string(),
             preview,
             is_new_file: false,
@@ -580,7 +583,13 @@ impl ToolKit {
                 "command '{command}' was rejected by the user"
             )));
         }
+        self.exec_shell(command, &dir, timeout_s)
+    }
 
+    /// Run `command` via the platform shell inside `dir`. Output is
+    /// captured through temp files (a killed shell's grandchildren must
+    /// never block us waiting on pipe EOF) and size-capped.
+    fn exec_shell(&self, command: &str, dir: &Path, timeout_s: u32) -> Result<String, CoreError> {
         #[cfg(windows)]
         let mut cmd = {
             let mut c = Command::new("cmd");
@@ -593,7 +602,7 @@ impl ToolKit {
             c.arg("-c");
             c
         };
-        cmd.arg(command).current_dir(&dir).stdin(Stdio::null());
+        cmd.arg(command).current_dir(dir).stdin(Stdio::null());
 
         // Capture output via temp files, not pipes: a killed shell's
         // grandchildren must never block us waiting for pipe EOF. Names
@@ -681,6 +690,98 @@ impl ToolKit {
             body.push_str("\n... truncated by harness");
         }
         Ok(body)
+    }
+
+    /// Execute a user-defined tool (see `tools/custom.rs`). The confirm
+    /// dialog shows the fully resolved command - the user approves
+    /// exactly what will run.
+    fn run_custom(
+        &self,
+        name: &str,
+        params: &[(String, String)],
+        confirm: &mut dyn FnMut(&ConfirmRequest) -> bool,
+    ) -> ToolOutput {
+        let fail = |body: String| ToolOutput {
+            verb: name.to_string(),
+            path: String::new(),
+            body,
+            is_error: true,
+            changed: false,
+        };
+        let Some(def) = self.registry.all().iter().find(|t| t.name == name) else {
+            return fail(format!(
+                "unknown tool '{name}' - enabled tools: {}",
+                self.registry.enabled_names()
+            ));
+        };
+        let Some(spec) = def.custom.as_ref() else {
+            return fail(format!("tool '{name}' has no custom definition"));
+        };
+        let missing: Vec<&str> = spec
+            .params
+            .iter()
+            .filter(|(p, _)| !params.iter().any(|(k, _)| k == p))
+            .map(|(p, _)| p.as_str())
+            .collect();
+        if !missing.is_empty() {
+            let hint: Vec<String> = missing.iter().map(|p| format!("{p}: <value>")).collect();
+            return fail(format!(
+                "missing required parameter(s) for {name}: {} - retry with:\n{}",
+                missing.join(", "),
+                hint.join("\n")
+            ));
+        }
+        let command = spec.substitute(params);
+        let timeout_s = spec.timeout;
+
+        #[cfg(windows)]
+        let shell_desc = "cmd /C";
+        #[cfg(not(windows))]
+        let shell_desc = "sh -c";
+        let mut preview = format!(
+            "shell: {shell_desc}\nruns in: {}\ntimeout: {timeout_s}s",
+            display_path(&self.root)
+        );
+        if looks_destructive(&command) {
+            preview.push_str("\n! warning: this command looks destructive");
+        }
+        let request = ConfirmRequest {
+            verb: name.to_string(),
+            path: command.clone(),
+            preview,
+            is_new_file: false,
+        };
+        if !confirm(&request) {
+            return fail(format!("command '{command}' was rejected by the user"));
+        }
+        match self.exec_shell(&command, &self.root, timeout_s) {
+            Ok(body) => ToolOutput {
+                verb: name.to_string(),
+                path: command,
+                body,
+                is_error: false,
+                changed: false,
+            },
+            Err(e) => fail(err_string(e)),
+        }
+    }
+
+    /// Load user-defined tools from `dir` (see `tools/custom.rs`).
+    /// Returns one warning per skipped file or rejected definition.
+    pub fn load_custom_tools(&mut self, dir: &std::path::Path) -> Vec<String> {
+        let (defs, mut warnings) = custom::load_dir(dir);
+        for def in defs {
+            if let Err(reason) = self.registry.add_custom(def) {
+                warnings.push(format!("skipped: {reason}"));
+            }
+        }
+        warnings
+    }
+
+    /// Rescan the custom tools directory from scratch (`/tools reload`).
+    pub fn reload_custom_tools(&mut self, dir: &std::path::Path) -> Vec<String> {
+        self.registry.clear_customs();
+        self.load_custom_tools(dir)
     }
 }
 
@@ -1200,5 +1301,120 @@ mod tests {
         assert!(out.body.contains("disabled"), "{}", out.body);
         assert!(out.body.contains("READ_FILE"), "{}", out.body);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn custom_tool_runs_through_the_confirm_gate() {
+        use crate::protocol::Action;
+        let dir = std::env::temp_dir().join("nah_cust_t1");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut kit = ToolKit::new(dir.clone(), 4096);
+        let def = crate::tools::custom::parse_tool_file(
+            "name: SAY_HI\ndescription: greet someone\nparams:\n  who: person to greet\ncommand: echo hi {who}\n",
+            "say.tool",
+        )
+        .unwrap()
+        .0;
+        kit.registry_mut().add_custom(def).unwrap();
+        let mut confirmations = 0;
+        let mut confirm = |req: &ConfirmRequest| -> bool {
+            confirmations += 1;
+            // the confirm shows the RESOLVED command (anti-injection)
+            assert_eq!(req.path, "echo hi world");
+            true
+        };
+        let action = Action::Custom {
+            name: "SAY_HI".to_string(),
+            params: vec![("who".to_string(), "world".to_string())],
+        };
+        let out = kit.run(&action, &mut confirm);
+        assert!(!out.is_error, "{}", out.body);
+        assert_eq!(confirmations, 1);
+        assert!(out.body.contains("hi world"), "{}", out.body);
+        assert_eq!(out.verb, "SAY_HI");
+
+        // missing required parameter -> teaching error, no confirm needed
+        let action = Action::Custom {
+            name: "SAY_HI".to_string(),
+            params: vec![],
+        };
+        let out = kit.run(&action, &mut |_: &ConfirmRequest| true);
+        assert!(out.is_error);
+        assert!(
+            out.body.contains("missing required parameter"),
+            "{}",
+            out.body
+        );
+        assert!(out.body.contains("who: <value>"), "{}", out.body);
+
+        // unknown tool name -> error with the enabled list
+        let action = Action::Custom {
+            name: "NOT_A_TOOL".to_string(),
+            params: vec![],
+        };
+        let out = kit.run(&action, &mut |_: &ConfirmRequest| true);
+        assert!(out.is_error);
+        assert!(out.body.contains("unknown tool"), "{}", out.body);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn custom_tools_load_toggle_and_reload() {
+        let dir = std::env::temp_dir().join("nah_cust_t2");
+        let _ = fs::remove_dir_all(&dir);
+        let tdir = dir.join("tools");
+        fs::create_dir_all(&tdir).unwrap();
+        fs::write(
+            tdir.join("good.tool"),
+            "name: GOOD_TOOL\ndescription: does nothing\ncommand: echo ok\n",
+        )
+        .unwrap();
+        fs::write(tdir.join("bad.tool"), "name: bad name\ncommand: x\n").unwrap();
+        fs::write(
+            tdir.join("naming.tool"),
+            "name: READ_FILE\ndescription: collides\ncommand: x\n",
+        )
+        .unwrap();
+
+        let mut kit = ToolKit::new(dir.clone(), 4096);
+        let warnings = kit.load_custom_tools(&tdir);
+        // bad file + builtin-name collision are skipped with warnings
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(kit.registry().enabled("GOOD_TOOL"));
+        // custom tools toggle like built-ins and persist in the name list
+        kit.registry_mut().set_enabled("GOOD_TOOL", false);
+        assert!(!kit.registry().enabled("GOOD_TOOL"));
+        assert!(!kit.registry().enabled_names().contains("GOOD_TOOL"));
+        assert!(kit
+            .registry()
+            .disabled_names()
+            .iter()
+            .any(|n| n == "GOOD_TOOL"));
+        // disabled state survives a reload (it lives in the config list)
+        kit.registry_mut().set_enabled("GOOD_TOOL", true);
+        let warnings = kit.reload_custom_tools(&tdir);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(kit.registry().enabled("GOOD_TOOL"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parser_accepts_custom_tool_blocks() {
+        use crate::protocol::Action;
+        let reply = "```tool\nNMAP_SCAN\ntarget: 10.0.0.5\nports: 1-100\n```";
+        let out = crate::protocol::parse(reply);
+        assert_eq!(out.actions.len(), 1, "{:?}", out.actions);
+        match &out.actions[0] {
+            Action::Custom { name, params } => {
+                assert_eq!(name, "NMAP_SCAN");
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0], ("target".to_string(), "10.0.0.5".to_string()));
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+        // non-tool names after the fence stay invalid
+        let out = crate::protocol::parse("```tool\nsomething_else\nx: 1\n```");
+        assert!(out.actions.is_empty(), "{:?}", out.actions);
     }
 }

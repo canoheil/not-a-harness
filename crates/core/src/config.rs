@@ -116,6 +116,18 @@ pub fn config_path() -> PathBuf {
     PathBuf::from("nah.conf")
 }
 
+/// The user-level custom tools directory (`~/.config/nah/tools/`).
+/// Project-local tool files are intentionally unsupported (supply chain).
+pub fn tools_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("nah")
+            .join("tools");
+    }
+    PathBuf::from("nah-tools")
+}
+
 /// Is there any config file? (used to decide whether to run first-time setup)
 pub fn config_exists() -> bool {
     config_path().exists() || Path::new("nah.conf").exists()
