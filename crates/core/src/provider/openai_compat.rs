@@ -11,13 +11,15 @@ use super::{ChatMessage, ChatRequest, LlmProvider, ModelInfo};
 
 pub struct OpenAiCompatProvider {
     base: String,
+    /// Real token counts from the most recent chat_stream call.
+    usage: Option<super::TokenUsage>,
 }
 
 impl OpenAiCompatProvider {
     pub fn new(base_url: &str) -> Result<Self, CoreError> {
         let base = base_url.trim().trim_end_matches('/').to_string();
         http::parse_url(&format!("{base}/v1/models"))?;
-        Ok(OpenAiCompatProvider { base })
+        Ok(OpenAiCompatProvider { base, usage: None })
     }
 }
 
@@ -126,7 +128,28 @@ impl LlmProvider for OpenAiCompatProvider {
                     on_delta(delta);
                 }
             }
+            // many servers report real tokenizer counts in the final chunk
+            if let Some(usage) = parsed.get("usage") {
+                let prompt = usage
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as usize;
+                let completion = usage
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as usize;
+                if prompt > 0 {
+                    self.usage = Some(super::TokenUsage {
+                        prompt_tokens: prompt,
+                        completion_tokens: completion,
+                    });
+                }
+            }
         }
         Ok(full)
+    }
+
+    fn take_usage(&mut self) -> Option<super::TokenUsage> {
+        self.usage.take()
     }
 }

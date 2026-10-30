@@ -78,6 +78,17 @@ pub struct ChatRequest<'a> {
     pub options: &'a ChatOptions,
 }
 
+/// Real token counts reported by the server after a chat call (Ollama
+/// `prompt_eval_count` / `eval_count`, OpenAI-compat `usage`). These are
+/// the ground truth of the model's own tokenizer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    /// Tokens the server counted for the prompt we sent.
+    pub prompt_tokens: usize,
+    /// Tokens the server counted for the generated reply.
+    pub completion_tokens: usize,
+}
+
 /// A local model backend (Ollama, llama.cpp server, ...).
 pub trait LlmProvider {
     /// Which models does the server expose?
@@ -90,6 +101,12 @@ pub trait LlmProvider {
         req: &ChatRequest<'_>,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<String, CoreError>;
+
+    /// Real token counts of the last `chat_stream` call, if the server
+    /// reported them. Consumed by the caller (returns once).
+    fn take_usage(&mut self) -> Option<TokenUsage> {
+        None
+    }
 }
 
 /// Pick a provider implementation by name / URL heuristic.

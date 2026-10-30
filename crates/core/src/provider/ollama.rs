@@ -8,6 +8,8 @@ use super::{ChatMessage, ChatOptions, ChatRequest, LlmProvider, ModelInfo};
 
 pub struct OllamaProvider {
     base: String,
+    /// Real token counts from the most recent chat_stream call.
+    usage: Option<super::TokenUsage>,
 }
 
 impl OllamaProvider {
@@ -15,7 +17,7 @@ impl OllamaProvider {
         let base = base_url.trim().trim_end_matches('/').to_string();
         // validate eagerly so bad URLs fail at startup
         http::parse_url(&format!("{base}/api/tags"))?;
-        Ok(OllamaProvider { base })
+        Ok(OllamaProvider { base, usage: None })
     }
 }
 
@@ -141,7 +143,21 @@ impl LlmProvider for OllamaProvider {
                     on_delta(delta);
                 }
             }
+            // the final chunk reports the model's real tokenizer counts
+            if let Some(prompt) = parsed.get("prompt_eval_count").and_then(|v| v.as_f64()) {
+                self.usage = Some(super::TokenUsage {
+                    prompt_tokens: prompt as usize,
+                    completion_tokens: parsed
+                        .get("eval_count")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as usize,
+                });
+            }
         }
         Ok(full)
+    }
+
+    fn take_usage(&mut self) -> Option<super::TokenUsage> {
+        self.usage.take()
     }
 }

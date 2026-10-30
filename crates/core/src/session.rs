@@ -191,7 +191,10 @@ impl<'a> Session<'a> {
                 }
                 on_event(&Event::Delta(delta))
             })?;
-            stats.est_tokens += crate::context::estimate_tokens(&reply);
+            if let Some(u) = self.provider.take_usage() {
+                self.context.observe_usage(u.prompt_tokens, &messages);
+            }
+            stats.est_tokens += crate::context::speed_tokens(&reply);
             if let Some(t) = first_token {
                 stats.gen_secs += t.elapsed().as_secs_f64();
             }
@@ -309,7 +312,10 @@ impl<'a> Session<'a> {
             }
             on_event(&Event::Delta(delta))
         })?;
-        stats.est_tokens += crate::context::estimate_tokens(&reply);
+        if let Some(u) = self.provider.take_usage() {
+            self.context.observe_usage(u.prompt_tokens, &messages);
+        }
+        stats.est_tokens += crate::context::speed_tokens(&reply);
         if let Some(t) = first_token {
             stats.gen_secs += t.elapsed().as_secs_f64();
         }
@@ -397,6 +403,68 @@ mod tests {
             on_delta(&reply);
             Ok(reply)
         }
+    }
+
+    /// Provider that reports real token counts for calibration.
+    struct Counting {
+        reply: String,
+        usage: crate::provider::TokenUsage,
+    }
+
+    impl LlmProvider for Counting {
+        fn list_models(&mut self) -> Result<Vec<ModelInfo>, CoreError> {
+            Ok(vec![])
+        }
+
+        fn chat_stream(
+            &mut self,
+            _req: &ChatRequest<'_>,
+            on_delta: &mut dyn FnMut(&str),
+        ) -> Result<String, CoreError> {
+            on_delta(&self.reply);
+            Ok(self.reply.clone())
+        }
+
+        fn take_usage(&mut self) -> Option<crate::provider::TokenUsage> {
+            Some(self.usage)
+        }
+    }
+
+    #[test]
+    fn run_turn_learns_the_real_tokenizer() {
+        let dir = std::env::temp_dir().join("nah_scale_t1");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let provider = Counting {
+            reply: "hello there".to_string(),
+            usage: crate::provider::TokenUsage {
+                prompt_tokens: 4_000,
+                completion_tokens: 3,
+            },
+        };
+        let mut session = Session::new(
+            Box::new(provider),
+            SessionConfig {
+                model: "test".into(),
+                options: ChatOptions::default(),
+                max_steps: 3,
+            },
+            ToolKit::new(dir.clone(), 4096),
+            ContextManager::new(ContextConfig::default()),
+        );
+        assert_eq!(session.context.token_scale_factor(), 1.0);
+        let mut events = |_e: &Event<'_>| {};
+        let mut confirm = |_r: &crate::tools::ConfirmRequest| false;
+        session
+            .run_turn("just say hi", &mut confirm, &mut events)
+            .unwrap();
+        // the server's real prompt count moved the calibration
+        assert!(
+            session.context.token_scale_factor() > 1.0,
+            "{}",
+            session.context.token_scale_factor()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn session_with(replies: Vec<String>, dir: &std::path::Path) -> Session<'static> {
