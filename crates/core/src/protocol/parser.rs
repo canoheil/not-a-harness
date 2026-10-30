@@ -48,6 +48,7 @@ pub fn parse(text: &str) -> ParsedOutput {
     let mut command: Option<String> = None;
     let mut cmd_cwd: Option<String> = None;
     let mut cmd_timeout: Option<u32> = None;
+    let mut move_to: Option<String> = None;
 
     // drop the candidate block back into prose (aborted / malformed)
     fn abort(block: &mut Vec<String>, prose: &mut Vec<String>) {
@@ -75,7 +76,13 @@ pub fn parse(text: &str) -> ParsedOutput {
                 }
                 if matches!(
                     t,
-                    "READ_FILE" | "WRITE_FILE" | "EDIT_FILE" | "LIST_DIR" | "RUN_COMMAND"
+                    "READ_FILE"
+                        | "WRITE_FILE"
+                        | "EDIT_FILE"
+                        | "LIST_DIR"
+                        | "RUN_COMMAND"
+                        | "DELETE_FILE"
+                        | "MOVE_FILE"
                 ) {
                     name = t.to_string();
                     state = State::Params;
@@ -91,6 +98,7 @@ pub fn parse(text: &str) -> ParsedOutput {
                     match make_action(
                         &name,
                         &path,
+                        &move_to,
                         offset,
                         &limit,
                         &content,
@@ -112,6 +120,7 @@ pub fn parse(text: &str) -> ParsedOutput {
                     reset(
                         &mut name,
                         &mut path,
+                        &mut move_to,
                         &mut offset,
                         &mut limit,
                         &mut content,
@@ -130,25 +139,14 @@ pub fn parse(text: &str) -> ParsedOutput {
                     let key = key.trim();
                     let value = value.trim();
                     match key {
-                        "path" => {
-                            if !value.is_empty() {
-                                path = Some(value.to_string());
-                            }
-                        }
+                        "path" if !value.is_empty() => path = Some(value.to_string()),
                         "offset" => offset = value.parse().ok(),
                         "limit" => limit = value.parse().ok(),
-                        "command" => {
-                            if !value.is_empty() {
-                                command = Some(value.to_string());
-                            }
-                        }
-                        "cwd" => {
-                            if !value.is_empty() {
-                                cmd_cwd = Some(value.to_string());
-                            }
-                        }
+                        "command" if !value.is_empty() => command = Some(value.to_string()),
+                        "cwd" if !value.is_empty() => cmd_cwd = Some(value.to_string()),
                         "timeout" => cmd_timeout = value.parse().ok(),
-                        _ => {} // ignore unknown keys, stay tolerant
+                        "to" if !value.is_empty() => move_to = Some(value.to_string()),
+                        _ => {} // unknown or empty keys are ignored, stay tolerant
                     }
                 } else if t.is_empty() {
                     // blank lines between params are fine
@@ -160,6 +158,7 @@ pub fn parse(text: &str) -> ParsedOutput {
                     reset(
                         &mut name,
                         &mut path,
+                        &mut move_to,
                         &mut offset,
                         &mut limit,
                         &mut content,
@@ -211,6 +210,7 @@ pub fn parse(text: &str) -> ParsedOutput {
 fn make_action(
     name: &str,
     path: &Option<String>,
+    move_to: &Option<String>,
     offset: Option<usize>,
     limit: &Option<usize>,
     content: &[String],
@@ -256,6 +256,11 @@ fn make_action(
             })
         }
         "LIST_DIR" => Some(Action::ListDir { path: p }),
+        "DELETE_FILE" => Some(Action::DeleteFile { path: p }),
+        "MOVE_FILE" => {
+            let to = move_to.clone()?;
+            Some(Action::MoveFile { path: p, to })
+        }
         _ => None,
     }
 }
@@ -264,6 +269,7 @@ fn make_action(
 fn reset(
     name: &mut String,
     path: &mut Option<String>,
+    move_to: &mut Option<String>,
     offset: &mut Option<usize>,
     limit: &mut Option<usize>,
     content: &mut Vec<String>,
@@ -275,6 +281,7 @@ fn reset(
 ) {
     name.clear();
     *path = None;
+    *move_to = None;
     *offset = None;
     *limit = None;
     content.clear();
@@ -648,5 +655,24 @@ mod tests {
     fn xml_block_missing_args_is_invalid_not_executed() {
         let p = parse("<function name=\"READ_FILE\"></function>");
         assert!(p.actions.is_empty());
+    }
+
+    #[test]
+    fn delete_and_move_parse() {
+        let p = parse(
+            "go\n```tool\nDELETE_FILE\npath: old.txt\n```\n```tool\nMOVE_FILE\npath: a.txt\nto: b.txt\n```\n",
+        );
+        assert!(p.invalid_blocks.is_empty(), "{:?}", p.invalid_blocks);
+        assert!(matches!(p.actions[0], Action::DeleteFile { ref path } if path == "old.txt"));
+        assert!(
+            matches!(p.actions[1], Action::MoveFile { ref path, ref to } if path == "a.txt" && to == "b.txt")
+        );
+    }
+
+    #[test]
+    fn move_without_target_is_invalid() {
+        let p = parse("```tool\nMOVE_FILE\npath: a.txt\n```\n");
+        assert!(p.actions.is_empty());
+        assert_eq!(p.invalid_blocks.len(), 1);
     }
 }

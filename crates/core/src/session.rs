@@ -175,7 +175,7 @@ impl<'a> Session<'a> {
 
             let messages = self.context.build(
                 &system_intro(&crate::tools::display_path(self.tools.root())),
-                protocol::tool_protocol_doc(),
+                &protocol::tool_protocol_doc(self.tools.registry()),
                 self.pinned_task.as_deref(),
                 &self.history,
             );
@@ -199,7 +199,7 @@ impl<'a> Session<'a> {
             let parsed = protocol::parse(&reply);
             for _block in &parsed.invalid_blocks {
                 on_event(&Event::Info(
-                    "[warn] model emitted an invalid tool block (ignored)".to_string(),
+                    "[warn] model emitted an invalid tool block (ignored) - check the tool name and required parameters, then retry".to_string(),
                 ));
             }
 
@@ -293,7 +293,7 @@ impl<'a> Session<'a> {
         ));
         let messages = self.context.build(
             &system_intro(&crate::tools::display_path(self.tools.root())),
-            protocol::tool_protocol_doc(),
+            &protocol::tool_protocol_doc(self.tools.registry()),
             self.pinned_task.as_deref(),
             &self.history,
         );
@@ -350,6 +350,8 @@ fn action_signature(action: &Action) -> String {
             replace,
         } => format!("E:{path}:{}:{}", h(search), h(replace)),
         Action::ListDir { path } => format!("L:{path}"),
+        Action::DeleteFile { path } => format!("D:{path}"),
+        Action::MoveFile { path, to } => format!("M:{path}->{to}"),
         Action::RunCommand {
             command,
             cwd,
@@ -427,7 +429,7 @@ mod tests {
         let s = format!(
             "{}\n\n{}",
             system_intro("/tmp/project"),
-            crate::protocol::tool_protocol_doc()
+            crate::protocol::tool_protocol_doc(&crate::tools::ToolRegistry::builtin())
         );
         let lower = s.to_lowercase();
         assert!(!lower.contains("persian"), "language forced: {s}");

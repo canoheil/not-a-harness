@@ -27,6 +27,9 @@ pub struct NahConfig {
     pub auto_approve: bool,
     pub color: bool,
     pub width: Option<usize>,
+    /// Tool names disabled by the user (`/tools off ...`); everything else
+    /// stays enabled.
+    pub disabled_tools: Vec<String>,
 }
 
 impl Default for NahConfig {
@@ -46,6 +49,7 @@ impl Default for NahConfig {
             auto_approve: false,
             color: true,
             width: None,
+            disabled_tools: Vec::new(),
         }
     }
 }
@@ -131,7 +135,8 @@ pub fn save(path: &Path, cfg: &NahConfig) -> Result<(), CoreError> {
          ctx = {}\n\
          history = {}\n\
          temperature = {}\n\
-         auto_approve = {}\n",
+         auto_approve = {}\n\
+         disabled_tools = \"{}\"\n",
         cfg.provider.as_str(),
         cfg.url,
         cfg.model,
@@ -139,6 +144,7 @@ pub fn save(path: &Path, cfg: &NahConfig) -> Result<(), CoreError> {
         cfg.history_messages,
         cfg.temperature,
         cfg.auto_approve,
+        cfg.disabled_tools.join(","),
     );
     std::fs::write(path, text)
         .map_err(|e| CoreError::Io(format!("cannot write {}: {e}", path.display())))?;
@@ -197,6 +203,13 @@ pub fn load_conf_file(path: &Path, cfg: &mut NahConfig) {
             }
             "auto_compact" | "compact" => {
                 cfg.auto_compact = matches!(value, "1" | "true" | "yes");
+            }
+            "disabled_tools" => {
+                cfg.disabled_tools = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
             _ => {}
         }
@@ -363,5 +376,31 @@ mod tests {
         assert_eq!(loaded.url, "http://localhost:9999");
         assert_eq!(loaded.model, "test-model:3b");
         assert_eq!(loaded.ctx_tokens, 2048);
+    }
+
+    #[test]
+    fn disabled_tools_roundtrip() {
+        let dir = std::env::temp_dir().join("nah_cfg_tools_t1");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nah.conf");
+        let mut cfg = NahConfig {
+            disabled_tools: vec!["LIST_DIR".to_string(), "RUN_COMMAND".to_string()],
+            ..Default::default()
+        };
+        save(&path, &cfg).unwrap();
+        let mut loaded = NahConfig::default();
+        load_conf_file(&path, &mut loaded);
+        assert_eq!(loaded.disabled_tools, vec!["LIST_DIR", "RUN_COMMAND"]);
+        // empty list survives too
+        cfg.disabled_tools.clear();
+        save(&path, &cfg).unwrap();
+        let mut loaded = NahConfig {
+            disabled_tools: vec!["X".to_string()],
+            ..Default::default()
+        };
+        load_conf_file(&path, &mut loaded);
+        assert!(loaded.disabled_tools.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

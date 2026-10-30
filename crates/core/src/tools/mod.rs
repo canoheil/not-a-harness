@@ -12,6 +12,10 @@
 
 pub mod diff;
 
+pub mod registry;
+
+pub use registry::{ToolDef, ToolKind, ToolRegistry};
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -55,6 +59,7 @@ impl ToolOutput {
 pub struct ToolKit {
     root: PathBuf,
     max_tool_bytes: usize,
+    registry: ToolRegistry,
 }
 
 impl ToolKit {
@@ -62,11 +67,20 @@ impl ToolKit {
         ToolKit {
             root,
             max_tool_bytes,
+            registry: ToolRegistry::builtin(),
         }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
+    }
+
+    pub fn registry_mut(&mut self) -> &mut ToolRegistry {
+        &mut self.registry
     }
 
     /// Resolve a model-supplied relative path inside the project root.
@@ -133,6 +147,18 @@ impl ToolKit {
         confirm: &mut dyn FnMut(&ConfirmRequest) -> bool,
     ) -> ToolOutput {
         let verb = action.verb();
+        if !self.registry.enabled(verb) {
+            return ToolOutput {
+                verb,
+                path: action.path().to_string(),
+                body: format!(
+                    "tool '{verb}' is disabled - enabled tools: {}",
+                    self.registry.enabled_names()
+                ),
+                is_error: true,
+                changed: false,
+            };
+        }
         let path = action.path().to_string();
         let result = match action {
             Action::ReadFile {
@@ -158,11 +184,18 @@ impl ToolKit {
             } => self
                 .run_command(command, cwd.as_deref(), timeout.unwrap_or(30), confirm)
                 .map_err(err_string),
+            Action::DeleteFile { path } => self.delete_file(path, confirm).map_err(err_string),
+            Action::MoveFile { path, to } => self.move_file(path, to, confirm).map_err(err_string),
         };
         match result {
             Ok(body) => {
-                let changed = matches!(action, Action::WriteFile { .. } | Action::EditFile { .. })
-                    && !body.contains("unchanged");
+                let changed = matches!(
+                    action,
+                    Action::WriteFile { .. }
+                        | Action::EditFile { .. }
+                        | Action::DeleteFile { .. }
+                        | Action::MoveFile { .. }
+                ) && !body.contains("unchanged");
                 ToolOutput {
                     verb,
                     path,
@@ -361,6 +394,107 @@ impl ToolKit {
             "edited '{rel}' in one place.{}",
             warn.map(|w| format!("\n({w})")).unwrap_or_default()
         ))
+    }
+
+    /// Delete one file, with a preview of what is lost and a confirm.
+    fn delete_file(
+        &self,
+        rel: &str,
+        confirm: &mut dyn FnMut(&ConfirmRequest) -> bool,
+    ) -> Result<String, CoreError> {
+        let full = self.resolve(rel)?;
+        if !full.exists() {
+            return Err(CoreError::Tool(format!(
+                "file not found: '{rel}' - nothing to delete"
+            )));
+        }
+        if full.is_dir() {
+            return Err(CoreError::Tool(format!(
+                "'{rel}' is a directory - DELETE_FILE removes files only"
+            )));
+        }
+        let bytes = fs::read(&full).unwrap_or_default();
+        let old = String::from_utf8_lossy(&bytes);
+        let mut preview = String::from("this content will be removed:\n");
+        for line in old.lines().take(12) {
+            preview.push_str(&format!("- {line}\n"));
+        }
+        let total = old.lines().count();
+        if total > 12 {
+            preview.push_str(&format!("- ... ({total} lines total)\n"));
+        }
+        if let Some(w) = nested_root_warning(&self.root, rel) {
+            preview = format!("{w}\n\n{preview}");
+        }
+        let approved = confirm(&ConfirmRequest {
+            verb: "DELETE_FILE",
+            path: rel.to_string(),
+            preview,
+            is_new_file: false,
+        });
+        if !approved {
+            return Err(CoreError::Tool(format!(
+                "delete of '{rel}' was rejected by the user"
+            )));
+        }
+        fs::remove_file(&full)
+            .map_err(|e| CoreError::Tool(format!("cannot delete '{rel}': {e}")))?;
+        Ok(format!("deleted '{rel}'."))
+    }
+
+    /// Move or rename one file (never overwrites an existing target).
+    fn move_file(
+        &self,
+        rel: &str,
+        to: &str,
+        confirm: &mut dyn FnMut(&ConfirmRequest) -> bool,
+    ) -> Result<String, CoreError> {
+        let full = self.resolve(rel)?;
+        let dest = self.resolve(to)?;
+        if !full.exists() {
+            return Err(CoreError::Tool(format!(
+                "file not found: '{rel}' - nothing to move"
+            )));
+        }
+        if full.is_dir() {
+            return Err(CoreError::Tool(format!(
+                "'{rel}' is a directory - MOVE_FILE moves files only"
+            )));
+        }
+        if dest.exists() {
+            return Err(CoreError::Tool(format!(
+                "destination '{to}' already exists - delete it first or pick another name"
+            )));
+        }
+        let bytes = fs::read(&full).unwrap_or_default();
+        let old = String::from_utf8_lossy(&bytes);
+        let mut preview = format!("move '{rel}' -> '{to}'\n");
+        for line in old.lines().take(6) {
+            preview.push_str(&format!("  {line}\n"));
+        }
+        let warn =
+            nested_root_warning(&self.root, rel).or_else(|| nested_root_warning(&self.root, to));
+        if let Some(w) = warn {
+            preview = format!("{w}\n\n{preview}");
+        }
+        let approved = confirm(&ConfirmRequest {
+            verb: "MOVE_FILE",
+            path: rel.to_string(),
+            preview,
+            is_new_file: false,
+        });
+        if !approved {
+            return Err(CoreError::Tool(format!(
+                "move of '{rel}' was rejected by the user"
+            )));
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| CoreError::Tool(format!("cannot create dir: {e}")))?;
+        }
+        fs::rename(&full, &dest)
+            .map_err(|e| CoreError::Tool(format!("cannot move '{rel}' to '{to}': {e}")))?;
+        Ok(format!("moved '{rel}' to '{to}'."))
     }
 
     fn list_dir(&self, rel: &str) -> Result<String, CoreError> {
@@ -1004,6 +1138,67 @@ mod tests {
         let rel = format!("{}/sub/inner.txt", tail.join("/"));
         let out = kit.write_file(&rel, "x\n", &mut |_| true).unwrap();
         assert!(out.contains("warning:"), "{out}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_file_removes_and_teaches_on_misses() {
+        let dir = std::env::temp_dir().join("nah_del_t1");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        let kit = ToolKit::new(dir.clone(), 4096);
+        let out = kit.delete_file("a.txt", &mut |_| true).unwrap();
+        assert!(out.contains("deleted 'a.txt'"), "{out}");
+        assert!(!dir.join("a.txt").exists());
+        // missing file
+        let err = kit
+            .delete_file("ghost.txt", &mut |_| true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("file not found"), "{err}");
+        // directories are refused
+        let err = kit
+            .delete_file("sub", &mut |_| true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is a directory"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_file_renames_but_never_overwrites() {
+        let dir = std::env::temp_dir().join("nah_move_t1");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), "hello\n").unwrap();
+        let kit = ToolKit::new(dir.clone(), 4096);
+        let out = kit.move_file("a.txt", "b.txt", &mut |_| true).unwrap();
+        assert!(out.contains("moved 'a.txt' to 'b.txt'"), "{out}");
+        assert!(!dir.join("a.txt").exists());
+        assert!(dir.join("b.txt").exists());
+        // destination collision is refused
+        fs::write(dir.join("c.txt"), "x\n").unwrap();
+        let err = kit
+            .move_file("c.txt", "b.txt", &mut |_| true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already exists"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disabled_tool_is_rejected_with_teaching_error() {
+        use crate::protocol::Action;
+        let dir = std::env::temp_dir().join("nah_gate_t1");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut kit = ToolKit::new(dir.clone(), 4096);
+        kit.registry_mut().set_enabled("LIST_DIR", false);
+        let out = kit.run(&Action::ListDir { path: ".".into() }, &mut |_| true);
+        assert!(out.is_error);
+        assert!(out.body.contains("disabled"), "{}", out.body);
+        assert!(out.body.contains("READ_FILE"), "{}", out.body);
         let _ = fs::remove_dir_all(&dir);
     }
 }
