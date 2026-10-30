@@ -46,6 +46,8 @@ jobs:
           cp target/release/nah "$stage/"
           cp README.md LICENSE "$stage/"
           tar czf "$stage.tar.gz" "$stage"
+          # stable alias so install.sh can use releases/latest/download/
+          cp "$stage.tar.gz" "nah-${{ matrix.target }}.tar.gz"
 
       - name: Package (windows)
         if: matrix.archive == 'zip'
@@ -56,6 +58,8 @@ jobs:
           cp target/release/nah.exe "$stage/"
           cp README.md LICENSE "$stage/"
           7z a "$stage.zip" "$stage"
+          # stable alias so install.ps1 can use releases/latest/download/
+          cp "$stage.zip" "nah-${{ matrix.target }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
