@@ -24,6 +24,8 @@ enum State {
     Content,
     Search,
     Replace,
+    /// User-defined tool blocks: plain `key: value` parameters only.
+    CustomParams,
 }
 
 pub fn parse(text: &str) -> ParsedOutput {
@@ -46,6 +48,7 @@ pub fn parse(text: &str) -> ParsedOutput {
     let mut search: Vec<String> = Vec::new();
     let mut replace: Vec<String> = Vec::new();
     let mut command: Option<String> = None;
+    let mut custom_params: Vec<(String, String)> = Vec::new();
     let mut cmd_cwd: Option<String> = None;
     let mut cmd_timeout: Option<u32> = None;
     let mut move_to: Option<String> = None;
@@ -86,6 +89,35 @@ pub fn parse(text: &str) -> ParsedOutput {
                 ) {
                     name = t.to_string();
                     state = State::Params;
+                } else if crate::tools::custom::is_tool_name(t) {
+                    name = t.to_string();
+                    custom_params.clear();
+                    state = State::CustomParams;
+                } else {
+                    abort(&mut block, &mut prose);
+                    state = State::Prose;
+                }
+            }
+            State::CustomParams => {
+                block.push(line.to_string());
+                let t = line.trim();
+                if t == CLOSE {
+                    out.actions.push(Action::Custom {
+                        name: std::mem::take(&mut name),
+                        params: std::mem::take(&mut custom_params),
+                    });
+                    block.clear();
+                    state = State::Prose;
+                } else if t.is_empty() {
+                    // blank lines between params are fine
+                } else if let Some((key, value)) = t.split_once(':') {
+                    let key = key.trim();
+                    if key.is_empty() {
+                        abort(&mut block, &mut prose);
+                        state = State::Prose;
+                    } else {
+                        custom_params.push((key.to_string(), value.trim().to_string()));
+                    }
                 } else {
                     abort(&mut block, &mut prose);
                     state = State::Prose;

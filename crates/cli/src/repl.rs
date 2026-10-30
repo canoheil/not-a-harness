@@ -26,7 +26,10 @@ impl<'a> Repl<'a> {
         provider: Box<dyn LlmProvider + 'a>,
         config: NahConfig,
     ) -> Result<Repl<'a>, CoreError> {
-        let tools = ToolKit::new(config.root.clone(), config.max_tool_bytes);
+        let mut tools = ToolKit::new(config.root.clone(), config.max_tool_bytes);
+        for w in tools.load_custom_tools(&nah_core::config::tools_dir()) {
+            ui.info(&format!("[warn] {w}"));
+        }
         let session = Session::new(
             provider,
             SessionConfig {
@@ -99,7 +102,7 @@ impl<'a> Repl<'a> {
 
         let mut confirm_fn = |req: &ConfirmRequest| -> bool {
             self.ui
-                .confirm(req.verb, &req.path, &req.preview, req.is_new_file)
+                .confirm(&req.verb, &req.path, &req.preview, req.is_new_file)
         };
         let ui = &self.ui;
         let mut on_event = |ev: &Event<'_>| match ev {
@@ -161,7 +164,25 @@ impl<'a> Repl<'a> {
             None => self.list_tools(),
             Some("on") => self.toggle_tool(true, parts.next()),
             Some("off") => self.toggle_tool(false, parts.next()),
-            Some("reload") => self.ui.ok("tools reloaded"),
+            Some("reload") => {
+                let warnings = self
+                    .session
+                    .tools
+                    .reload_custom_tools(&nah_core::config::tools_dir());
+                for w in &warnings {
+                    self.ui.info(&format!("[warn] {w}"));
+                }
+                let customs = self
+                    .session
+                    .tools
+                    .registry()
+                    .all()
+                    .iter()
+                    .filter(|t| t.kind == nah_core::tools::ToolKind::Custom)
+                    .count();
+                self.ui
+                    .ok(&format!("tools reloaded - {customs} custom tool(s) active"));
+            }
             Some(other) => {
                 self.ui.info(&format!(
                     "unknown subcommand: {other} - usage: /tools [on|off <name>]"
@@ -444,7 +465,10 @@ pub fn run_oneshot(
     provider: Box<dyn LlmProvider + '_>,
     prompt: &str,
 ) -> Result<(), CoreError> {
-    let tools = ToolKit::new(config.root.clone(), config.max_tool_bytes);
+    let mut tools = ToolKit::new(config.root.clone(), config.max_tool_bytes);
+    for w in tools.load_custom_tools(&nah_core::config::tools_dir()) {
+        ui.info(&format!("[warn] {w}"));
+    }
     let mut session = Session::new(
         provider,
         SessionConfig {
@@ -462,7 +486,7 @@ pub fn run_oneshot(
         if auto {
             return true;
         }
-        ui.confirm(req.verb, &req.path, &req.preview, req.is_new_file)
+        ui.confirm(&req.verb, &req.path, &req.preview, req.is_new_file)
     };
     let mut on_event = |ev: &Event<'_>| match ev {
         Event::Delta(text) => ui.delta(text),

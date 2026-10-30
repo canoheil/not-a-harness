@@ -20,6 +20,42 @@ pub struct ToolDef {
     /// Prompt section (example fence + one-line description) shown to the
     /// model whenever the tool is enabled.
     pub doc: String,
+    /// Execution spec for user-defined tools (none for built-ins).
+    pub custom: Option<CustomSpec>,
+}
+
+/// A user-defined tool from `~/.config/nah/tools/*.tool`: a command
+/// template with `{param}` placeholders. Every declared parameter is
+/// required (v1); execution always goes through the confirm gate.
+#[derive(Debug, Clone, Default)]
+pub struct CustomSpec {
+    /// (name, help) pairs, in definition order.
+    pub params: Vec<(String, String)>,
+    pub command: String,
+    pub command_windows: Option<String>,
+    pub command_unix: Option<String>,
+    /// Seconds, clamped to 1..=300 (default 30).
+    pub timeout: u32,
+}
+
+impl CustomSpec {
+    /// The command template for the current platform.
+    pub fn template_for_platform(&self) -> &str {
+        if cfg!(windows) {
+            self.command_windows.as_deref().unwrap_or(&self.command)
+        } else {
+            self.command_unix.as_deref().unwrap_or(&self.command)
+        }
+    }
+
+    /// Replace `{param}` placeholders with the given values.
+    pub fn substitute(&self, values: &[(String, String)]) -> String {
+        let mut out = self.template_for_platform().to_string();
+        for (k, v) in values {
+            out = out.replace(&format!("{{{k}}}"), v);
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -96,6 +132,7 @@ impl ToolRegistry {
             name: name.to_string(),
             kind: ToolKind::Builtin,
             doc: doc.to_string(),
+            custom: None,
         })
         .collect();
         Self {
@@ -143,6 +180,21 @@ impl ToolRegistry {
     /// Apply a persisted disabled list.
     pub fn set_disabled_list(&mut self, names: Vec<String>) {
         self.disabled = names;
+    }
+
+    /// Register a user-defined tool. Fails on name collisions so the
+    /// model can never confuse it with a built-in or another custom tool.
+    pub fn add_custom(&mut self, def: ToolDef) -> Result<(), String> {
+        if self.tools.iter().any(|t| t.name == def.name) {
+            return Err(format!("tool name '{}' is already taken", def.name));
+        }
+        self.tools.push(def);
+        Ok(())
+    }
+
+    /// Drop all user-defined tools (used by `/tools reload`).
+    pub fn clear_customs(&mut self) {
+        self.tools.retain(|t| t.kind == ToolKind::Builtin);
     }
 
     /// Comma-separated enabled names for teaching error messages.
