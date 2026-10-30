@@ -8,6 +8,33 @@
 
 ---
 
+## 🚀 نصب (فقط یک دستور)
+
+یک ترمینال باز کن، این یک خط رو کپی-پیست کن و Enter بزن — دانلود و نصب خودکار شروع می‌شه:
+
+**ویندوز (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/canoheil/not-a-harness/main/install.ps1 | iex
+```
+
+**لینوکس / مک:**
+```sh
+curl -fsSL https://raw.githubusercontent.com/canoheil/not-a-harness/main/install.sh | sh
+```
+
+اسکریپت آخرین نسخه‌ی منتشرشده رو از GitHub Releases می‌گیره، در مسیر استاندارد نصب می‌کنه و PATH رو تنظیم می‌کنه. بعدش هر جای هر ترمینالی فقط کافیه بنویسی:
+
+```text
+nah
+```
+
+- اولین بار که نصب کردی، ترمینال رو یک‌بار ببند و دوباره باز کن (تا PATH تازه بشه).
+- **آپدیت:** همان دستور نصب رو دوباره اجرا کن.
+- **حذف:** ویندوز `Remove-Item -Recurse $env:LOCALAPPDATA\nah` و مسیر آن را از PATH کاربر پاک کن؛ لینوکس/مک `rm -f ~/.local/bin/nah`.
+- نصب از سورس هم ممکنه: `git clone` + `cargo build --release` (بخش توسعه).
+
+---
+
 ## ✨ چرا nah؟
 
 | ویژگی | توضیح |
