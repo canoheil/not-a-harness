@@ -355,6 +355,8 @@ impl<'a> Repl<'a> {
                     // a different model should not see the old conversation
                     self.session.reset();
                     self.session.config.model = rest.to_string();
+                    // ...and its tokenizer needs fresh token calibration
+                    self.session.context.reset_token_scale();
                     self.ui
                         .ok(&format!("model set to {rest} - conversation reset"));
                 }

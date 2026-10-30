@@ -35,8 +35,56 @@ impl Default for ContextConfig {
     }
 }
 
-pub fn estimate_tokens(text: &str) -> usize {
+/// Fast chars/4 heuristic used ONLY by the tok/s speed line
+/// (locked product decision: estimate with `~`, never exact counts).
+pub fn speed_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4)
+}
+
+/// Static token estimate: ASCII text scores about 4 characters per
+/// token; non-ASCII scripts (Persian, CJK, ...) score heavier because
+/// most tokenizers spend a token per character or two on them. Being
+/// slightly conservative here is safe - calibration then pulls the
+/// number towards the model's real tokenizer.
+pub fn estimate_tokens(text: &str) -> usize {
+    let mut milli = 0usize;
+    for c in text.chars() {
+        milli += if c.is_ascii() { 250 } else { 700 };
+    }
+    milli.div_ceil(1000)
+}
+
+/// Calibration multiplier learned from the server's real prompt counts.
+#[derive(Debug, Clone, Copy)]
+pub struct TokenScale {
+    factor: f64,
+}
+
+impl Default for TokenScale {
+    fn default() -> Self {
+        TokenScale { factor: 1.0 }
+    }
+}
+
+impl TokenScale {
+    /// Multiplier applied to static estimates.
+    pub fn factor(&self) -> f64 {
+        self.factor
+    }
+
+    /// Fold one real observation into the scale. `estimated` must be the
+    /// unscaled estimate of exactly the text the server counted.
+    pub fn observe(&mut self, actual: usize, estimated: usize) {
+        if actual == 0 || estimated == 0 {
+            return;
+        }
+        let ratio = (actual as f64 / estimated as f64).clamp(0.25, 4.0);
+        self.factor = (self.factor * 0.5 + ratio * 0.5).clamp(0.25, 4.0);
+    }
+
+    pub fn reset(&mut self) {
+        self.factor = 1.0;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +97,7 @@ pub struct ContextManager {
     pub config: ContextConfig,
     open_files: Vec<OpenFile>,
     pub summary: String,
+    scale: TokenScale,
 }
 
 impl ContextManager {
@@ -57,7 +106,32 @@ impl ContextManager {
             config,
             open_files: Vec::new(),
             summary: String::new(),
+            scale: TokenScale::default(),
         }
+    }
+
+    /// Scaled token estimate used for every budget decision and for the
+    /// context-usage display.
+    fn est(&self, text: &str) -> usize {
+        ((estimate_tokens(text) as f64) * self.scale.factor()).round() as usize
+    }
+
+    /// Feed the server's real prompt-token count back so future
+    /// estimates track the model's actual tokenizer. `sent` is exactly
+    /// the message list that was transmitted.
+    pub fn observe_usage(&mut self, prompt_tokens: usize, sent: &[ChatMessage]) {
+        let base: usize = sent.iter().map(|m| estimate_tokens(&m.content)).sum();
+        self.scale.observe(prompt_tokens, base);
+    }
+
+    /// Current calibration factor (1.0 = no observations yet).
+    pub fn token_scale_factor(&self) -> f64 {
+        self.scale.factor()
+    }
+
+    /// Forget calibration (e.g. the model - and its tokenizer - changed).
+    pub fn reset_token_scale(&mut self) {
+        self.scale.reset();
     }
 
     /// The model read a file — remember its content (replacing any older copy).
@@ -81,16 +155,16 @@ impl ContextManager {
         &self.open_files
     }
 
-    /// Rough token usage of what a request would carry: summary + working
-    /// set + history. Deliberately approximate (chars/4) - it feeds the
-    /// UI's context-usage line, not the budget logic.
+    /// Token usage of what a request would carry: summary, working set
+    /// and history. Calibrated against the server's real counts; feeds
+    /// the UI's context-usage line.
     pub fn estimate_usage(&self, history: &[ChatMessage]) -> usize {
-        let mut total = estimate_tokens(&self.summary);
+        let mut total = self.est(&self.summary);
         for f in &self.open_files {
-            total += estimate_tokens(&f.content);
+            total += self.est(&f.content);
         }
         for m in history {
-            total += estimate_tokens(&m.content);
+            total += self.est(&m.content);
         }
         total
     }
@@ -116,19 +190,19 @@ impl ContextManager {
         system.push_str(system_intro);
         system.push_str("\n\n");
         system.push_str(tool_doc);
-        used += estimate_tokens(&system);
+        used += self.est(&system);
 
         // 2) rolling summary (if any)
         if !self.summary.is_empty() {
             let block = format!("\n\n[SUMMARY OF EARLIER CONVERSATION]\n{}\n", self.summary);
-            used += estimate_tokens(&block);
+            used += self.est(&block);
             system.push_str(&block);
         }
 
         // 3) pinned task — the original request never leaves the context
         if let Some(task) = pinned_task {
             let block = format!("\n\n[ORIGINAL USER TASK]\n{task}\n");
-            used += estimate_tokens(&block);
+            used += self.est(&block);
             system.push_str(&block);
         }
 
@@ -141,7 +215,7 @@ impl ContextManager {
                 "\n--- FILE {} (current content) ---\n{}\n--- END FILE ---\n",
                 f.path, f.content
             );
-            let cost = estimate_tokens(&block);
+            let cost = self.est(&block);
             if used + cost > budget * 8 / 10 {
                 files_block.push_str("\n(older file contents omitted to fit the context window)\n");
                 break;
@@ -164,7 +238,7 @@ impl ContextManager {
         tail.reverse();
         let mut kept: Vec<ChatMessage> = Vec::new();
         for m in tail.into_iter().rev() {
-            let cost = estimate_tokens(&m.content);
+            let cost = self.est(&m.content);
             if used + cost > budget {
                 break;
             }
@@ -228,6 +302,9 @@ impl ContextManager {
             },
         };
         let summary = provider.chat_stream(&req, &mut |_s| {})?;
+        if let Some(u) = provider.take_usage() {
+            self.observe_usage(u.prompt_tokens, &prompt);
+        }
         self.summary = summary.trim().to_string();
         Ok(cut)
     }
@@ -318,5 +395,112 @@ mod tests {
             ChatMessage::assistant("abcdefghijklmnop"), // 4 tokens
         ];
         assert_eq!(cm.estimate_usage(&history), 2 + 2 + 4);
+    }
+    /// Minimal provider that reports real token counts once.
+    struct Counting {
+        usage: Option<crate::provider::TokenUsage>,
+    }
+
+    impl LlmProvider for Counting {
+        fn list_models(
+            &mut self,
+        ) -> Result<Vec<crate::provider::ModelInfo>, crate::error::CoreError> {
+            Ok(vec![])
+        }
+
+        fn chat_stream(
+            &mut self,
+            _req: &ChatRequest<'_>,
+            _on_delta: &mut dyn FnMut(&str),
+        ) -> Result<String, crate::error::CoreError> {
+            Ok("summary text".to_string())
+        }
+
+        fn take_usage(&mut self) -> Option<crate::provider::TokenUsage> {
+            self.usage.take()
+        }
+    }
+
+    #[test]
+    fn estimator_weights_non_ascii_scripts() {
+        // pure ASCII keeps the classic chars/4 behaviour
+        assert_eq!(estimate_tokens("abcdefghijklmnop"), 4);
+        assert_eq!(estimate_tokens(""), 0);
+        // Persian text must cost more than chars/4 - most tokenizers
+        // spend far more than a quarter token per character on it
+        let persian = "سلام دنیا، این یک متن فارسی است";
+        assert!(
+            estimate_tokens(persian) > persian.chars().count() / 4,
+            "{} vs {}",
+            estimate_tokens(persian),
+            persian.chars().count() / 4
+        );
+        // and the speed line keeps its simple chars/4 estimate (locked)
+        assert_eq!(speed_tokens("abcdefghijklmnop"), 4);
+    }
+
+    #[test]
+    fn token_scale_calibrates_clamps_and_resets() {
+        let mut scale = TokenScale::default();
+        assert_eq!(scale.factor(), 1.0);
+        // the server says the real prompt is twice our estimate
+        scale.observe(200, 100);
+        assert!((scale.factor() - 1.5).abs() < 1e-9, "{}", scale.factor());
+        // next observation pulls it back down (EMA)
+        scale.observe(100, 200);
+        assert!((scale.factor() - 1.0).abs() < 1e-9, "{}", scale.factor());
+        // wild ratios are clamped
+        for _ in 0..10 {
+            scale.observe(10_000, 1);
+        }
+        assert!(scale.factor() <= 4.0, "{}", scale.factor());
+        // zero counts never divide by zero
+        scale.observe(0, 0);
+        scale.reset();
+        assert_eq!(scale.factor(), 1.0);
+    }
+
+    #[test]
+    fn calibration_scales_budget_and_usage() {
+        let mut ctx = ContextManager::new(ContextConfig::default());
+        let history = vec![crate::provider::ChatMessage::user("x".repeat(400))];
+        let before = ctx.estimate_usage(&history);
+        // the model's tokenizer really counts 3x our static estimate
+        for _ in 0..5 {
+            ctx.observe_usage(300, &history);
+        }
+        let after = ctx.estimate_usage(&history);
+        assert!(
+            after > before * 2,
+            "before={before} after={after} factor={}",
+            ctx.token_scale_factor()
+        );
+        // switching models forgets the calibration
+        ctx.reset_token_scale();
+        assert_eq!(ctx.estimate_usage(&history), before);
+    }
+
+    #[test]
+    fn compact_learns_the_real_tokenizer() {
+        let mut ctx = ContextManager::new(ContextConfig::default());
+        let history: Vec<crate::provider::ChatMessage> = (0..12)
+            .map(|i| {
+                crate::provider::ChatMessage::user(format!("message number {i} with some text"))
+            })
+            .collect();
+        let mut provider = Counting {
+            usage: Some(crate::provider::TokenUsage {
+                prompt_tokens: 5_000,
+                completion_tokens: 10,
+            }),
+        };
+        let cut = ctx.compact(&mut provider, "m", &history).unwrap();
+        assert!(cut > 0);
+        // the compact call fed the real prompt count into the scale
+        assert!(
+            ctx.token_scale_factor() > 1.0,
+            "{}",
+            ctx.token_scale_factor()
+        );
     }
 }

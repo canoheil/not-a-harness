@@ -98,6 +98,7 @@ class Handler(BaseHTTPRequestHandler):
             "message": {"role": "assistant", "content": ""},
             "done": True,
             "eval_count": 42,
+            "prompt_eval_count": 800,
         }).encode() + b"\n")
         self.wfile.write(b"0\r\n\r\n")
 
