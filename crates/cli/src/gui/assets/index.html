@@ -10,7 +10,8 @@
   <div id="app">
     <header>
       <div class="logo">nah 🐎</div>
-      <div class="meta"><b id="m-model">…</b> · <span id="m-server">…</span></div>
+      <select id="m-model" title="model (switching starts a fresh conversation)"></select>
+      <div class="meta"><span id="m-server">…</span></div>
       <div class="spacer"></div>
       <div class="modes" id="modes" title="permission mode">
         <button data-mode="read-only">Read-Only</button>
@@ -18,6 +19,17 @@
         <button data-mode="auto">Auto</button>
       </div>
     </header>
+
+    <nav class="toolbar">
+      <button class="tb" id="tb-new" title="start a fresh conversation">＋ New chat</button>
+      <button class="tb" id="tb-compact" title="summarize older history">🗜 Compact</button>
+      <span class="tsep"></span>
+      <button class="tb" id="tb-tools" title="enable or disable tools">🧩 Tools</button>
+      <button class="tb" id="tb-files" title="files the harness is holding">📁 Files</button>
+      <button class="tb" id="tb-settings" title="provider, model, budget, root">⚙ Settings</button>
+      <div class="spacer"></div>
+      <span class="root" id="tb-root" title="project root"></span>
+    </nav>
 
     <div id="chat"></div>
 
@@ -30,11 +42,75 @@
         <span id="s-busy"></span>
       </div>
       <div class="composer">
-        <textarea id="input" rows="1" placeholder="Ask nah to build something… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <div class="input-wrap">
+          <div class="palette" id="palette"></div>
+          <textarea id="input" rows="1" placeholder="Ask nah to build something… (Enter to send, Shift+Enter for a new line, / for commands)"></textarea>
+        </div>
         <button class="btn primary send" id="send">Send</button>
       </div>
     </footer>
   </div>
+
+  <div class="drawer-backdrop" id="drawer-backdrop"></div>
+  <aside class="drawer" id="drawer">
+    <div class="drawer-head">
+      <div class="drawer-tabs">
+        <button data-tab="settings" class="active">Settings</button>
+        <button data-tab="tools">Tools</button>
+        <button data-tab="files">Files</button>
+      </div>
+      <button class="btn ghost" id="drawer-close">✕</button>
+    </div>
+
+    <section class="pane" data-pane="settings">
+      <label>Provider</label>
+      <div class="row">
+        <select id="cfg-provider">
+          <option value="ollama">ollama</option>
+          <option value="openai">openai</option>
+        </select>
+      </div>
+      <label>Server URL</label>
+      <div class="row">
+        <input id="cfg-url" type="text" spellcheck="false">
+      </div>
+      <label>Model <small>(switching starts a fresh conversation)</small></label>
+      <div class="row">
+        <select id="cfg-model"></select>
+        <button class="btn ghost" id="cfg-model-refresh" title="reload model list">⟳</button>
+      </div>
+      <label>Context budget (tokens)</label>
+      <div class="row">
+        <input id="cfg-ctx" type="number" min="512" step="256">
+      </div>
+      <label>History window (messages)</label>
+      <div class="row">
+        <input id="cfg-history" type="number" min="1" max="100">
+      </div>
+      <label>Project root</label>
+      <div class="row">
+        <input id="cfg-root" type="text" spellcheck="false">
+      </div>
+      <label class="check"><input id="cfg-autocompact" type="checkbox"> auto-compaction of old history</label>
+      <div class="row">
+        <button class="btn primary" id="cfg-apply">Apply</button>
+        <span class="hint" id="cfg-hint"></span>
+      </div>
+    </section>
+
+    <section class="pane" data-pane="tools" hidden>
+      <div class="row">
+        <button class="btn ghost" id="tools-reload">⟳ reload custom tools</button>
+        <span class="hint" id="tools-hint"></span>
+      </div>
+      <div id="tools-list"></div>
+    </section>
+
+    <section class="pane" data-pane="files" hidden>
+      <div id="files-list"></div>
+    </section>
+  </aside>
+
   <script src="app.js"></script>
 </body>
 </html>

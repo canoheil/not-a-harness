@@ -37,10 +37,13 @@ struct Pending {
 struct Status {
     model: String,
     server: String,
+    provider: String,
     root: String,
     ctx_tokens: usize,
     usage_tokens: usize,
     messages: usize,
+    history: usize,
+    auto_compact: bool,
     stats: String,
 }
 
@@ -114,9 +117,10 @@ impl UiState {
     }
 }
 
-/// The engine behind the GUI: one session, one tool kit.
+/// The engine behind the GUI: one session plus its live configuration.
 struct Engine {
     session: Session<'static>,
+    cfg: NahConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,16 +161,19 @@ fn state_json(state: &UiState) -> String {
     }
     let s = &inner.status;
     format!(
-        "{{\"model\":\"{}\",\"server\":\"{}\",\"root\":\"{}\",\"mode\":\"{}\",\
-         \"ctx_tokens\":{},\"usage_tokens\":{},\"messages\":{},\"busy\":{},\
-         \"stats\":\"{}\",\"pending\":[{}]}}",
+        "{{\"model\":\"{}\",\"server\":\"{}\",\"provider\":\"{}\",\"root\":\"{}\",\
+         \"mode\":\"{}\",\"ctx_tokens\":{},\"usage_tokens\":{},\"messages\":{},\
+         \"history\":{},\"auto_compact\":{},\"busy\":{},\"stats\":\"{}\",\"pending\":[{}]}}",
         esc(&s.model),
         esc(&s.server),
+        esc(&s.provider),
         esc(&s.root),
         esc(&inner.mode),
         s.ctx_tokens,
         s.usage_tokens,
         s.messages,
+        s.history,
+        s.auto_compact,
         inner.busy,
         esc(&s.stats),
         pending
@@ -307,7 +314,331 @@ fn handle_client(mut stream: TcpStream, engine: Arc<Mutex<Engine>>, state: Arc<U
             }
         }
         ("POST", "/api/mode") => mode_handler(&mut stream, &req, &engine, &state),
+        ("GET", "/api/models") => models_handler(&mut stream, &engine, &state),
+        ("GET", "/api/tools") => tools_handler(&mut stream, &engine, &state),
+        ("POST", "/api/tools") => tool_toggle_handler(&mut stream, &req, &engine, &state),
+        ("POST", "/api/tools/reload") => tools_reload_handler(&mut stream, &engine, &state),
+        ("GET", "/api/files") => files_handler(&mut stream, &engine, &state),
+        ("POST", "/api/config") => config_handler(&mut stream, &req, &engine, &state),
+        ("POST", "/api/reset") => reset_handler(&mut stream, &engine, &state),
+        ("POST", "/api/compact") => compact_handler(&mut stream, &engine, &state),
         _ => respond(&mut stream, "404 Not Found", "text/plain", "not found"),
+    }
+}
+
+/// True while a turn is streaming; mutating endpoints must wait.
+fn reject_if_busy(stream: &mut TcpStream, state: &UiState) -> bool {
+    if state.inner.lock().unwrap().busy {
+        respond(
+            stream,
+            "409 Conflict",
+            "application/json",
+            "{\"ok\":false,\"busy\":true}",
+        );
+        true
+    } else {
+        false
+    }
+}
+
+fn models_handler(stream: &mut TcpStream, engine: &Arc<Mutex<Engine>>, state: &UiState) {
+    if reject_if_busy(stream, state) {
+        return;
+    }
+    let models = engine.lock().unwrap().session.provider.list_models();
+    match models {
+        Ok(models) => {
+            let list: Vec<String> = models
+                .iter()
+                .map(|m| format!("\"{}\"", esc(&m.name)))
+                .collect();
+            respond(
+                stream,
+                "200 OK",
+                "application/json",
+                &format!("{{\"models\":[{}]}}", list.join(",")),
+            );
+        }
+        Err(e) => respond(
+            stream,
+            "502 Bad Gateway",
+            "application/json",
+            &format!("{{\"ok\":false,\"error\":\"{}\"", esc(&e.to_string())),
+        ),
+    }
+}
+
+fn tools_handler(stream: &mut TcpStream, engine: &Arc<Mutex<Engine>>, state: &UiState) {
+    if reject_if_busy(stream, state) {
+        return;
+    }
+    let engine = engine.lock().unwrap();
+    let registry = engine.session.tools.registry();
+    let items: Vec<String> = registry
+        .all()
+        .iter()
+        .map(|t| {
+            format!(
+                "{{\"name\":\"{}\",\"kind\":\"{}\",\"enabled\":{},\"stateful\":{}}}",
+                esc(&t.name),
+                match t.kind {
+                    nah_core::tools::ToolKind::Builtin => "builtin",
+                    nah_core::tools::ToolKind::Custom => "custom",
+                },
+                registry.enabled(&t.name),
+                nah_core::tools::registry::is_state_changing(&t.name)
+            )
+        })
+        .collect();
+    drop(engine);
+    respond(
+        stream,
+        "200 OK",
+        "application/json",
+        &format!("{{\"tools\":[{}]}}", items.join(",")),
+    );
+}
+
+fn tool_toggle_handler(
+    stream: &mut TcpStream,
+    req: &Request,
+    engine: &Arc<Mutex<Engine>>,
+    state: &UiState,
+) {
+    if reject_if_busy(stream, state) {
+        return;
+    }
+    let Some(name) = json_field(&req.body, "name") else {
+        respond(
+            stream,
+            "400 Bad Request",
+            "application/json",
+            "{\"ok\":false}",
+        );
+        return;
+    };
+    let on = json_field(&req.body, "on")
+        .map(|v| v == "true")
+        .unwrap_or(true);
+    let mut engine = engine.lock().unwrap();
+    if !engine.session.tools.registry_mut().set_enabled(&name, on) {
+        respond(
+            stream,
+            "404 Not Found",
+            "application/json",
+            "{\"ok\":false}",
+        );
+        return;
+    }
+    // persist the disabled list like the terminal /tools does
+    let disabled = engine.session.tools.registry().disabled_names();
+    engine.cfg.disabled_tools = disabled.to_vec();
+    let cfg = engine.cfg.clone();
+    drop(engine);
+    let _ = nah_core::config::save(&nah_core::config::config_path(), &cfg);
+    respond(stream, "200 OK", "application/json", "{\"ok\":true}");
+}
+
+fn tools_reload_handler(stream: &mut TcpStream, engine: &Arc<Mutex<Engine>>, state: &UiState) {
+    if reject_if_busy(stream, state) {
+        return;
+    }
+    let warnings = engine
+        .lock()
+        .unwrap()
+        .session
+        .tools
+        .reload_custom_tools(&nah_core::config::tools_dir());
+    let list: Vec<String> = warnings.iter().map(|w| format!("\"{}\"", esc(w))).collect();
+    respond(
+        stream,
+        "200 OK",
+        "application/json",
+        &format!("{{\"ok\":true,\"warnings\":[{}]}}", list.join(",")),
+    );
+}
+
+fn files_handler(stream: &mut TcpStream, engine: &Arc<Mutex<Engine>>, state: &UiState) {
+    if reject_if_busy(stream, state) {
+        return;
+    }
+    let engine = engine.lock().unwrap();
+    let items: Vec<String> = engine
+        .session
+        .context
+        .open_files()
+        .iter()
+        .map(|f| {
+            format!(
+                "{{\"path\":\"{}\",\"content\":\"{}\"}}",
+                esc(&f.path),
+                esc(&f.content)
+            )
+        })
+        .collect();
+    drop(engine);
+    respond(
+        stream,
+        "200 OK",
+        "application/json",
+        &format!("{{\"files\":[{}]}}", items.join(",")),
+    );
+}
+
+fn config_handler(
+    stream: &mut TcpStream,
+    req: &Request,
+    engine: &Arc<Mutex<Engine>>,
+    state: &UiState,
+) {
+    if reject_if_busy(stream, state) {
+        return;
+    }
+    let mut engine = engine.lock().unwrap();
+    let mut fresh = false;
+
+    if let Some(model) = json_field(&req.body, "model") {
+        if model != engine.cfg.model {
+            engine.cfg.model = model.clone();
+            engine.session.config.model = model;
+            // a different model must not see the old conversation
+            engine.session.reset();
+            engine.session.context.reset_token_scale();
+            fresh = true;
+        }
+    }
+    if let Some(url) = json_field(&req.body, "url") {
+        if url != engine.cfg.url {
+            engine.cfg.url = url;
+            fresh = true;
+        }
+    }
+    if let Some(kind) = json_field(&req.body, "provider") {
+        let new_kind = match kind.trim().to_ascii_lowercase().as_str() {
+            "openai" => nah_core::provider::ProviderKind::OpenAiCompat,
+            _ => nah_core::provider::ProviderKind::Ollama,
+        };
+        if new_kind != engine.cfg.provider {
+            engine.cfg.provider = new_kind;
+            fresh = true;
+        }
+    }
+    if fresh {
+        match nah_core::provider::connect(engine.cfg.provider, &engine.cfg.url) {
+            Ok(p) => {
+                engine.session.provider = p;
+                engine.session.reset();
+                engine.session.context.reset_token_scale();
+                let mut inner = state.inner.lock().unwrap();
+                inner.status.model = engine.cfg.model.clone();
+                inner.status.server = engine.cfg.url.clone();
+                inner.status.provider = match engine.cfg.provider {
+                    nah_core::provider::ProviderKind::Ollama => "ollama".to_string(),
+                    nah_core::provider::ProviderKind::OpenAiCompat => "openai".to_string(),
+                };
+            }
+            Err(e) => {
+                respond(
+                    stream,
+                    "502 Bad Gateway",
+                    "application/json",
+                    &format!("{{\"ok\":false,\"error\":\"{}\"", esc(&e.to_string())),
+                );
+                return;
+            }
+        }
+    }
+    if let Some(v) = json_field(&req.body, "ctx_tokens").and_then(|v| v.parse::<usize>().ok()) {
+        let v = v.clamp(512, 1_000_000);
+        engine.cfg.ctx_tokens = v;
+        engine.session.config.options.num_ctx = v as u32;
+        engine.session.context.config.ctx_tokens = v;
+        state.inner.lock().unwrap().status.ctx_tokens = v;
+    }
+    if let Some(v) = json_field(&req.body, "history").and_then(|v| v.parse::<usize>().ok()) {
+        let v = v.clamp(1, 100);
+        engine.cfg.history_messages = v;
+        engine.session.context.config.history_messages = v;
+        state.inner.lock().unwrap().status.history = v;
+    }
+    if let Some(v) = json_field(&req.body, "auto_compact") {
+        let on = v == "true";
+        engine.cfg.auto_compact = on;
+        engine.session.context.config.auto_compact = on;
+        state.inner.lock().unwrap().status.auto_compact = on;
+    }
+    if let Some(root) = json_field(&req.body, "root") {
+        let path = std::path::PathBuf::from(&root);
+        if path.is_dir() {
+            engine.cfg.root = path.clone();
+            engine.session.tools.set_root(path);
+            state.inner.lock().unwrap().status.root = root;
+        } else {
+            respond(
+                stream,
+                "400 Bad Request",
+                "application/json",
+                "{\"ok\":false,\"error\":\"not a directory\"}",
+            );
+            return;
+        }
+    }
+    let cfg = engine.cfg.clone();
+    drop(engine);
+    let _ = nah_core::config::save(&nah_core::config::config_path(), &cfg);
+    respond(stream, "200 OK", "application/json", "{\"ok\":true}");
+}
+
+fn reset_handler(stream: &mut TcpStream, engine: &Arc<Mutex<Engine>>, state: &UiState) {
+    if reject_if_busy(stream, state) {
+        return;
+    }
+    let mut engine = engine.lock().unwrap();
+    engine.session.reset();
+    engine.session.context.reset_token_scale();
+    drop(engine);
+    let mut inner = state.inner.lock().unwrap();
+    inner.status.messages = 0;
+    inner.status.usage_tokens = 0;
+    inner.status.stats.clear();
+    respond(stream, "200 OK", "application/json", "{\"ok\":true}");
+}
+
+fn compact_handler(stream: &mut TcpStream, engine: &Arc<Mutex<Engine>>, state: &UiState) {
+    if reject_if_busy(stream, state) {
+        return;
+    }
+    // compaction runs a model call; mark busy so the UI stays honest
+    state.inner.lock().unwrap().busy = true;
+    let result = engine.lock().unwrap().session.force_compact();
+    state.inner.lock().unwrap().busy = false;
+    match result {
+        Ok(0) => respond(
+            stream,
+            "200 OK",
+            "application/json",
+            "{\"ok\":true,\"absorbed\":0}",
+        ),
+        Ok(n) => {
+            let engine = engine.lock().unwrap();
+            let (usage, msgs) = engine.session.context_usage();
+            drop(engine);
+            let mut inner = state.inner.lock().unwrap();
+            inner.status.usage_tokens = usage;
+            inner.status.messages = msgs;
+            respond(
+                stream,
+                "200 OK",
+                "application/json",
+                &format!("{{\"ok\":true,\"absorbed\":{n}}}"),
+            );
+        }
+        Err(e) => respond(
+            stream,
+            "502 Bad Gateway",
+            "application/json",
+            &format!("{{\"ok\":false,\"error\":\"{}\"", esc(&e.to_string())),
+        ),
     }
 }
 
@@ -495,7 +826,10 @@ pub fn serve(cfg: NahConfig, port: u16) -> Result<(), CoreError> {
         tools,
         nah_core::context::ContextManager::new(cfg.context_config()),
     );
-    let engine = Arc::new(Mutex::new(Engine { session }));
+    let engine = Arc::new(Mutex::new(Engine {
+        session,
+        cfg: cfg.clone(),
+    }));
     let state = Arc::new(UiState::new());
     {
         let mut inner = state.inner.lock().unwrap();
@@ -503,10 +837,16 @@ pub fn serve(cfg: NahConfig, port: u16) -> Result<(), CoreError> {
         inner.status = Status {
             model: cfg.model.clone(),
             server: cfg.url.clone(),
+            provider: match cfg.provider {
+                nah_core::provider::ProviderKind::Ollama => "ollama".to_string(),
+                nah_core::provider::ProviderKind::OpenAiCompat => "openai".to_string(),
+            },
             root: cfg.root.display().to_string(),
             ctx_tokens: cfg.ctx_tokens,
             usage_tokens: 0,
             messages: 0,
+            history: cfg.history_messages,
+            auto_compact: cfg.auto_compact,
             stats: String::new(),
         };
     }
