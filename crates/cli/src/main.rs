@@ -1,6 +1,7 @@
 //! `nah` - terminal front-end.
 
 mod ctrlc;
+mod gui;
 mod repl;
 mod setup;
 mod spinner;
@@ -18,9 +19,11 @@ fn main() {
     ctrlc::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // pre-pass: strip flags handled here (-p/--prompt, --setup)
+    // pre-pass: strip flags handled here (-p/--prompt, --setup, --gui)
     let mut prompt: Option<String> = None;
     let mut run_setup = false;
+    let mut run_gui = false;
+    let mut gui_port: u16 = 8787;
     let mut filtered: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -34,6 +37,14 @@ fn main() {
                 }
             }
             "--setup" => run_setup = true,
+            "--gui" => run_gui = true,
+            "--port" => {
+                i += 1;
+                gui_port = args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("option --port needs a number");
+                    std::process::exit(2);
+                });
+            }
             other => filtered.push(other.to_string()),
         }
         i += 1;
@@ -63,6 +74,14 @@ fn main() {
         }
     } else if !config::config_exists() {
         ui.info("no config file found - using defaults (run `nah --setup` to configure)");
+    }
+
+    if run_gui {
+        if let Err(e) = gui::serve(cfg, gui_port) {
+            ui.error(&e.to_string());
+            std::process::exit(1);
+        }
+        return;
     }
 
     let provider = match provider::connect(cfg.provider, &cfg.url) {

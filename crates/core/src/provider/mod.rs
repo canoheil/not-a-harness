@@ -90,7 +90,7 @@ pub struct TokenUsage {
 }
 
 /// A local model backend (Ollama, llama.cpp server, ...).
-pub trait LlmProvider {
+pub trait LlmProvider: Send {
     /// Which models does the server expose?
     fn list_models(&mut self) -> Result<Vec<ModelInfo>, CoreError>;
 

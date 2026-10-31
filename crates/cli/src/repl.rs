@@ -244,6 +244,7 @@ impl<'a> Repl<'a> {
   /compact          summarize older history now (frees context space)
   /files            show files in the working set
   /tools            list tools and toggle them on/off (only enabled ones reach the model)
+  /mode [name]      permission mode: read-only | confirm | auto (default: confirm)
   /root             show the project root
   /yes | /no        toggle auto-approve for file writes and commands
   /reset            clear conversation history and session memory
@@ -394,6 +395,19 @@ impl<'a> Repl<'a> {
                     for f in files {
                         println!("  - {} ({} lines)", f.path, f.content.lines().count());
                     }
+                }
+            }
+            "mode" => {
+                if rest.is_empty() {
+                    self.ui.info(&format!(
+                        "current mode: {} (read-only | confirm | auto)",
+                        self.session.tools.registry().mode().as_str()
+                    ));
+                } else if let Some(mode) = nah_core::tools::Mode::parse(rest) {
+                    self.session.tools.registry_mut().set_mode(mode);
+                    self.ui.ok(&format!("mode set to {}", mode.as_str()));
+                } else {
+                    self.ui.info("usage: /mode read-only | confirm | auto");
                 }
             }
             "tools" => self.handle_tools(rest),

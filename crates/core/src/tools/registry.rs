@@ -13,6 +13,47 @@ pub enum ToolKind {
     Custom,
 }
 
+/// Global permission mode. The GUI switches it live; the REPL uses
+/// `/mode`. Read-Only hides and refuses every state-changing tool, Auto
+/// runs without asking, Confirm (the default) asks per action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    ReadOnly,
+    #[default]
+    Confirm,
+    Auto,
+}
+
+impl Mode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Mode::ReadOnly => "read-only",
+            Mode::Confirm => "confirm",
+            Mode::Auto => "auto",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "read-only" | "readonly" | "read_only" | "ro" => Some(Mode::ReadOnly),
+            "confirm" => Some(Mode::Confirm),
+            "auto" => Some(Mode::Auto),
+            _ => None,
+        }
+    }
+
+    /// May a tool with this name run at all in this mode?
+    pub fn allows(&self, name: &str) -> bool {
+        *self != Mode::ReadOnly || !is_state_changing(name)
+    }
+}
+
+/// Tools that can change state. Everything except the two pure-read
+/// tools counts - custom tools run shell commands, so they do too.
+pub fn is_state_changing(name: &str) -> bool {
+    !matches!(name, "READ_FILE" | "LIST_DIR")
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolDef {
     pub name: String,
@@ -62,6 +103,7 @@ impl CustomSpec {
 pub struct ToolRegistry {
     tools: Vec<ToolDef>,
     disabled: Vec<String>,
+    mode: Mode,
 }
 
 const DOC_READ: &str = r"```tool
@@ -138,13 +180,26 @@ impl ToolRegistry {
         Self {
             tools,
             disabled: Vec::new(),
+            mode: Mode::default(),
         }
     }
 
-    /// Tools the model may use, in prompt order. The future global Mode
-    /// (read-only / confirm / auto) will filter in this same place.
+    /// Tools the model may see right now: enabled AND allowed by mode.
     pub fn visible(&self) -> impl Iterator<Item = &ToolDef> {
-        self.tools.iter().filter(|t| self.enabled(&t.name))
+        let mode = self.mode;
+        self.tools
+            .iter()
+            .filter(move |t| self.enabled(&t.name) && mode.allows(&t.name))
+    }
+
+    /// Current global permission mode.
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Switch the global permission mode.
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
     }
 
     pub fn all(&self) -> &[ToolDef] {
@@ -239,5 +294,41 @@ mod tests {
         assert!(reg.enabled("READ_FILE"));
         assert!(reg.enabled_names().contains("READ_FILE"));
         assert!(!reg.enabled_names().contains("RUN_COMMAND"));
+    }
+
+    #[test]
+    fn mode_filters_visible_tools() {
+        let mut reg = ToolRegistry::builtin();
+        assert_eq!(reg.mode(), Mode::Confirm);
+        assert_eq!(reg.visible().count(), 7);
+        // read-only: only the two pure-read tools remain
+        reg.set_mode(Mode::ReadOnly);
+        let names: Vec<&str> = reg.visible().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["READ_FILE", "LIST_DIR"]);
+        // custom tools are state-changing too
+        reg.add_custom(ToolDef {
+            name: "NMAP_SCAN".into(),
+            kind: ToolKind::Custom,
+            doc: String::new(),
+            custom: Some(CustomSpec::default()),
+        })
+        .unwrap();
+        assert!(!reg.visible().any(|t| t.name == "NMAP_SCAN"));
+        // auto shows everything enabled again
+        reg.set_mode(Mode::Auto);
+        assert_eq!(reg.visible().count(), 8);
+    }
+
+    #[test]
+    fn mode_parsing_round_trips() {
+        assert_eq!(Mode::parse("read-only"), Some(Mode::ReadOnly));
+        assert_eq!(Mode::parse("RO"), Some(Mode::ReadOnly));
+        assert_eq!(Mode::parse("confirm"), Some(Mode::Confirm));
+        assert_eq!(Mode::parse("AUTO"), Some(Mode::Auto));
+        assert_eq!(Mode::parse("fast"), None);
+        assert_eq!(Mode::ReadOnly.as_str(), "read-only");
+        assert!(Mode::ReadOnly.allows("READ_FILE"));
+        assert!(!Mode::ReadOnly.allows("RUN_COMMAND"));
+        assert!(Mode::Auto.allows("RUN_COMMAND"));
     }
 }
