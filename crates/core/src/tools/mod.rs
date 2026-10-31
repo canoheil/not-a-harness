@@ -15,7 +15,7 @@ pub mod diff;
 pub mod custom;
 pub mod registry;
 
-pub use registry::{ToolDef, ToolKind, ToolRegistry};
+pub use registry::{Mode, ToolDef, ToolKind, ToolRegistry};
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -161,6 +161,28 @@ impl ToolKit {
                 changed: false,
             };
         }
+        // Read-Only mode: state-changing tools are refused before any work.
+        if !self.registry.mode().allows(&verb) {
+            let body = format!(
+                "mode is read-only - '{verb}' can change state; switch to confirm \
+                 or auto (/mode, or the Mode control in the GUI) to use it"
+            );
+            return ToolOutput {
+                verb,
+                path: action.path().to_string(),
+                body,
+                is_error: true,
+                changed: false,
+            };
+        }
+        // Auto mode runs without asking.
+        let mut always = |_r: &ConfirmRequest| true;
+        let confirm: &mut dyn FnMut(&ConfirmRequest) -> bool =
+            if self.registry.mode() == registry::Mode::Auto {
+                &mut always
+            } else {
+                confirm
+            };
         let path = action.path().to_string();
         let result = match action {
             Action::Custom { name, params } => return self.run_custom(name, params, confirm),
@@ -1416,5 +1438,40 @@ mod tests {
         // non-tool names after the fence stay invalid
         let out = crate::protocol::parse("```tool\nsomething_else\nx: 1\n```");
         assert!(out.actions.is_empty(), "{:?}", out.actions);
+    }
+
+    #[test]
+    fn read_only_mode_refuses_writes_and_auto_skips_confirm() {
+        use crate::protocol::Action;
+        let dir = std::env::temp_dir().join("nah_mode_t1");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut kit = ToolKit::new(dir.clone(), 4096);
+
+        // read-only: WRITE_FILE is refused with a teaching error
+        kit.registry_mut().set_mode(registry::Mode::ReadOnly);
+        let asks = std::cell::Cell::new(0);
+        let mut confirm = |_: &ConfirmRequest| {
+            asks.set(asks.get() + 1);
+            true
+        };
+        let action = Action::WriteFile {
+            path: "a.txt".into(),
+            content: "hi".into(),
+        };
+        let out = kit.run(&action, &mut confirm);
+        assert!(out.is_error);
+        assert!(out.body.contains("read-only"), "{}", out.body);
+        assert_eq!(asks.get(), 0, "must not even ask in read-only");
+        // reads still work
+        let out = kit.run(&Action::ListDir { path: ".".into() }, &mut confirm);
+        assert!(!out.is_error, "{}", out.body);
+
+        // auto: no confirmation asked
+        kit.registry_mut().set_mode(registry::Mode::Auto);
+        let out = kit.run(&action, &mut confirm);
+        assert!(!out.is_error, "{}", out.body);
+        assert_eq!(asks.get(), 0, "auto mode must not ask");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

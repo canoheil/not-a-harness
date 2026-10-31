@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nah</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="logo">nah 🐎</div>
+      <div class="meta"><b id="m-model">…</b> · <span id="m-server">…</span></div>
+      <div class="spacer"></div>
+      <div class="modes" id="modes" title="permission mode">
+        <button data-mode="read-only">Read-Only</button>
+        <button data-mode="confirm">Confirm</button>
+        <button data-mode="auto">Auto</button>
+      </div>
+    </header>
+
+    <div id="chat"></div>
+
+    <footer>
+      <div class="status">
+        <span id="s-stats"></span>
+        <div class="ctxbar" title="context budget"><i id="s-ctx-fill" style="width:0%"></i></div>
+        <span id="s-ctx">0 / 0 tokens</span>
+        <div class="spacer"></div>
+        <span id="s-busy"></span>
+      </div>
+      <div class="composer">
+        <textarea id="input" rows="1" placeholder="Ask nah to build something… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <button class="btn primary send" id="send">Send</button>
+      </div>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

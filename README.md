@@ -30,6 +30,7 @@ It is built for locally-run models on modest hardware. The entire program is a s
 | 🔒 **Safe by default** | Every write shows a diff and asks first; commands and custom tools show the exact resolved command. Paths are sandboxed to the project root. |
 | 🧩 **Custom tools** | Wrap domain-specific commands as plain-text tool files; toggle built-ins per workflow. The model only ever sees the tools that are enabled. |
 | ⚡ **Polished terminal UX** | Streaming output, per-turn speed and context meters, first-run setup wizard, and a one-shot mode for scripts and CI. |
+| 🖥 **Web GUI included** | `nah --gui` opens a local browser interface: chat, inline tool approvals, permission modes, live context meter. |
 
 ## Installation
 
@@ -135,6 +136,28 @@ context: ~312/4096 tokens - 4 messages (/compact summarizes)
 
 Raw tool blocks are never dumped into the output — the run reads like a transcript of actions, previews, and answers.
 
+## Graphical Interface
+
+`nah` ships with a built-in web GUI:
+
+```sh
+nah --gui
+```
+
+This starts a small local server and opens the interface in your browser — a dark workspace with chat streaming, inline tool-approval cards (diffs and commands), a permission-mode switcher, and a live context meter. The engine underneath is exactly the one the terminal uses.
+
+- Served on `http://127.0.0.1:8787` (change the port with `--port <n>`).
+- Everything runs locally — no external services, no CDNs.
+- A native desktop window (Tauri) wrapping the same interface is on the roadmap.
+
+**Permission modes** (the GUI switcher, or `/mode` in the terminal):
+
+| Mode | Behaviour |
+|---|---|
+| `read-only` | Only `READ_FILE` and `LIST_DIR` are visible and runnable; anything that can change state is refused. |
+| `confirm` | *(default)* every write or command asks for approval. |
+| `auto` | Actions run without asking (same as `--yes`). |
+
 ## Usage
 
 ### Command line
@@ -158,6 +181,8 @@ Options:
   --no-color              disable colors
   --no-compact            disable automatic history summarization
   --width <n>             override terminal width for text wrapping
+  --gui                 start the web GUI instead of the terminal UI
+  --port <n>            port for the web GUI (default: 8787)
   --version               print version
   --help                  show this help
 ```
@@ -176,6 +201,7 @@ Options:
 | `/history [n]` | show or set the trailing-message window |
 | `/files` | files currently held in the working set |
 | `/tools [on\|off <name>\|reload]` | manage built-in and custom tools |
+| `/mode [name]` | permission mode: `read-only` / `confirm` / `auto` |
 | `/root [dir]` | show or change the project root |
 | `/compact` | summarize older history now |
 | `/reset` | start a fresh conversation |
@@ -340,7 +366,7 @@ Pushing a `v*` tag builds release binaries for all supported targets (Windows x8
 
 ## Roadmap
 
-- Desktop GUI (Tauri) sharing the same engine
+- Native desktop window (Tauri) wrapping the web GUI
 - Global permission modes — read-only / confirm / auto — with quick switching
 - Project-local custom tools behind an explicit opt-in flag
 
