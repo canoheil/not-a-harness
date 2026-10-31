@@ -21,12 +21,17 @@
     </header>
 
     <nav class="toolbar">
-      <button class="tb" id="tb-new" title="start a fresh conversation">＋ New chat</button>
-      <button class="tb" id="tb-compact" title="summarize older history">🗜 Compact</button>
+      <button class="tb" id="tb-new" title="start a fresh conversation">
+        <svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>New chat</button>
+      <button class="tb" id="tb-compact" title="summarize older history">
+        <svg viewBox="0 0 16 16"><path d="M8 2v7M5 6l3 3 3-3M3 13h10"/></svg>Compact</button>
       <span class="tsep"></span>
-      <button class="tb" id="tb-tools" title="enable or disable tools">🧩 Tools</button>
-      <button class="tb" id="tb-files" title="files the harness is holding">📁 Files</button>
-      <button class="tb" id="tb-settings" title="provider, model, budget, root">⚙ Settings</button>
+      <button class="tb" id="tb-tools" title="enable or disable tools">
+        <svg viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="4.5" height="4.5"/><rect x="9" y="2.5" width="4.5" height="4.5"/><rect x="2.5" y="9" width="4.5" height="4.5"/><rect x="9" y="9" width="4.5" height="4.5"/></svg>Tools</button>
+      <button class="tb" id="tb-files" title="files the harness is holding">
+        <svg viewBox="0 0 16 16"><path d="M2 4h4l1.5 2H14v7H2z"/></svg>Files</button>
+      <button class="tb" id="tb-settings" title="provider, model, budget, root">
+        <svg viewBox="0 0 16 16"><path d="M2 5h12M2 11h12"/><circle cx="6" cy="5" r="1.8"/><circle cx="10" cy="11" r="1.8"/></svg>Settings</button>
       <div class="spacer"></div>
       <span class="root" id="tb-root" title="project root"></span>
     </nav>
@@ -44,7 +49,7 @@
       <div class="composer">
         <div class="input-wrap">
           <div class="palette" id="palette"></div>
-          <textarea id="input" rows="1" placeholder="Ask nah to build something… (Enter to send, Shift+Enter for a new line, / for commands)"></textarea>
+          <textarea id="input" rows="1" placeholder="Ask nah to build something… (Enter to send · / for commands)"></textarea>
         </div>
         <button class="btn primary send" id="send">Send</button>
       </div>
