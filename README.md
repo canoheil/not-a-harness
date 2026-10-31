@@ -144,11 +144,18 @@ Raw tool blocks are never dumped into the output — the run reads like a transc
 nah --gui
 ```
 
-This starts a small local server and opens the interface in your browser — a dark workspace with chat streaming, inline tool-approval cards (diffs and commands), a permission-mode switcher, and a live context meter. The engine underneath is exactly the one the terminal uses.
+This starts a small local server and opens the interface in your browser — a dark workspace where every terminal command has a clickable control, so you never need to type `/` commands:
 
-- Served on `http://127.0.0.1:8787` (change the port with `--port <n>`).
-- Everything runs locally — no external services, no CDNs.
-- A native desktop window (Tauri) wrapping the same interface is on the roadmap.
+- **toolbar** — new chat, compact history, tools panel, files panel, settings;
+- **model switcher** in the header (live list from the server) — switching starts a fresh conversation;
+- **settings panel** — provider, server URL, model, context budget, history window, project root, auto-compaction;
+- **tools panel** — enable/disable any tool (built-in or custom) and reload custom tool files;
+- **files panel** — the working set with content previews;
+- **inline tool-approval cards** — diffs and resolved commands with Approve/Reject (approvals work mid-turn);
+- **permission-mode switcher** and a live context meter;
+- typing `/` in the composer opens a command palette that triggers the same controls — slash input never reaches the model.
+
+Served on `http://127.0.0.1:8787` (change the port with `--port <n>`). Everything runs locally — no external services, no CDNs. A native desktop window (Tauri) wrapping the same interface is on the roadmap.
 
 **Permission modes** (the GUI switcher, or `/mode` in the terminal):
 
