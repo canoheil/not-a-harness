@@ -301,7 +301,7 @@ impl ContextManager {
                 temperature: 0.0,
             },
         };
-        let summary = provider.chat_stream(&req, &mut |_s| {})?;
+        let summary = provider.chat_stream(&req, &mut |_s| true)?;
         if let Some(u) = provider.take_usage() {
             self.observe_usage(u.prompt_tokens, &prompt);
         }
@@ -411,7 +411,7 @@ mod tests {
         fn chat_stream(
             &mut self,
             _req: &ChatRequest<'_>,
-            _on_delta: &mut dyn FnMut(&str),
+            _on_delta: &mut dyn FnMut(&str) -> bool,
         ) -> Result<String, crate::error::CoreError> {
             Ok("summary text".to_string())
         }

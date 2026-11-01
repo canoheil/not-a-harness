@@ -55,6 +55,8 @@ struct Inner {
     busy: bool,
     mode: String,
     status: Status,
+    /// The session's cancel flag (same AtomicBool) - `/api/stop` sets it.
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Shared UI-side state: pending confirmations, status, busy flag.
@@ -295,6 +297,7 @@ fn handle_client(mut stream: TcpStream, engine: Arc<Mutex<Engine>>, state: Arc<U
             respond(&mut stream, "200 OK", "application/json", &body);
         }
         ("POST", "/api/chat") => chat_handler(&mut stream, &req, &engine, &state),
+        ("POST", "/api/stop") => stop_handler(&mut stream, &state),
         ("POST", "/api/confirm") => {
             let id = json_field(&req.body, "id")
                 .and_then(|v| v.parse().ok())
@@ -677,6 +680,28 @@ fn mode_handler(
     respond(stream, "200 OK", "application/json", "{\"ok\":true}");
 }
 
+/// Stop the running turn (`POST /api/stop`). Works while busy - this is
+/// the point: every other mutating endpoint is rejected mid-turn. Any
+/// confirmations still waiting are answered "deny" so the turn unwinds
+/// at the next tool boundary.
+fn stop_handler(stream: &mut TcpStream, state: &Arc<UiState>) {
+    {
+        let mut inner = state.inner.lock().unwrap();
+        inner.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let pending: Vec<u64> = inner.pending.iter().map(|p| p.id).collect();
+        for id in pending {
+            inner.answers.push((id, false));
+        }
+    }
+    state.cv.notify_all();
+    respond(
+        stream,
+        "200 OK",
+        "application/json",
+        "{\"ok\":true,\"stopped\":true}",
+    );
+}
+
 fn chat_handler(
     stream: &mut TcpStream,
     req: &Request,
@@ -704,6 +729,7 @@ fn chat_handler(
             );
             return;
         }
+        inner.stop.store(false, std::sync::atomic::Ordering::SeqCst);
         inner.busy = true;
     }
 
@@ -833,6 +859,7 @@ pub fn serve(cfg: NahConfig, port: u16) -> Result<(), CoreError> {
     let state = Arc::new(UiState::new());
     {
         let mut inner = state.inner.lock().unwrap();
+        inner.stop = engine.lock().unwrap().session.stop_handle();
         inner.mode = mode;
         inner.status = Status {
             model: cfg.model.clone(),

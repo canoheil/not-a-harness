@@ -95,11 +95,13 @@ pub trait LlmProvider: Send {
     fn list_models(&mut self) -> Result<Vec<ModelInfo>, CoreError>;
 
     /// Run one chat completion, calling `on_delta` with each text fragment
-    /// as it streams in. Returns the full assembled text.
+    /// as it streams in. `on_delta` returns `false` to stop generation
+    /// early (the text streamed so far is returned). Returns the full
+    /// assembled text.
     fn chat_stream(
         &mut self,
         req: &ChatRequest<'_>,
-        on_delta: &mut dyn FnMut(&str),
+        on_delta: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String, CoreError>;
 
     /// Real token counts of the last `chat_stream` call, if the server

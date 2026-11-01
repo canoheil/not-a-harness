@@ -66,7 +66,7 @@ impl LlmProvider for OpenAiCompatProvider {
     fn chat_stream(
         &mut self,
         req: &ChatRequest<'_>,
-        on_delta: &mut dyn FnMut(&str),
+        on_delta: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String, CoreError> {
         let mut payload = messages_to_json(req.messages, req.options.temperature);
         if let Json::Obj(entries) = &mut payload {
@@ -125,7 +125,10 @@ impl LlmProvider for OpenAiCompatProvider {
             {
                 if !delta.is_empty() {
                     full.push_str(delta);
-                    on_delta(delta);
+                    if !on_delta(delta) {
+                        // stop requested (user cancelled) - return what we have
+                        return Ok(full);
+                    }
                 }
             }
             // many servers report real tokenizer counts in the final chunk

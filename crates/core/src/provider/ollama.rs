@@ -99,7 +99,7 @@ impl LlmProvider for OllamaProvider {
     fn chat_stream(
         &mut self,
         req: &ChatRequest<'_>,
-        on_delta: &mut dyn FnMut(&str),
+        on_delta: &mut dyn FnMut(&str) -> bool,
     ) -> Result<String, CoreError> {
         let mut payload = messages_to_json(req.messages, req.options);
         // set model name
@@ -140,7 +140,10 @@ impl LlmProvider for OllamaProvider {
             {
                 if !delta.is_empty() {
                     full.push_str(delta);
-                    on_delta(delta);
+                    if !on_delta(delta) {
+                        // stop requested (user cancelled) - return what we have
+                        return Ok(full);
+                    }
                 }
             }
             // the final chunk reports the model's real tokenizer counts

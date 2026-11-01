@@ -30,7 +30,7 @@ impl<'a> Repl<'a> {
         for w in tools.load_custom_tools(&nah_core::config::tools_dir()) {
             ui.info(&format!("[warn] {w}"));
         }
-        let session = Session::new(
+        let mut session = Session::new(
             provider,
             SessionConfig {
                 model: config.model.clone(),
@@ -40,6 +40,8 @@ impl<'a> Repl<'a> {
             tools,
             ContextManager::new(config.context_config()),
         );
+        // Ctrl+C while a turn runs cancels the turn (see ctrlc.rs)
+        session.bind_stop_handle(crate::ctrlc::stop_handle());
         Ok(Repl {
             ui,
             session,
@@ -51,7 +53,7 @@ impl<'a> Repl<'a> {
         self.ui.banner();
         self.ui.rtl_font_notice();
         self.ui.info(&format!(
-            "model: {} | server: {} | ctx: {} tokens",
+            "model: {} | server: {} | ctx: {} tokens | ctrl+c stops a running turn",
             self.config.model, self.config.url, self.config.ctx_tokens
         ));
         println!();
@@ -130,7 +132,10 @@ impl<'a> Repl<'a> {
             }
         };
 
-        match self.session.run_turn(input, &mut confirm_fn, &mut on_event) {
+        crate::ctrlc::set_turn_running(true);
+        let result = self.session.run_turn(input, &mut confirm_fn, &mut on_event);
+        crate::ctrlc::set_turn_running(false);
+        match result {
             Ok(stats) => {
                 if stats.est_tokens > 0 {
                     self.ui.stat(&format!(
@@ -495,6 +500,7 @@ pub fn run_oneshot(
         tools,
         ContextManager::new(config.context_config()),
     );
+    session.bind_stop_handle(crate::ctrlc::stop_handle());
 
     let auto = config.auto_approve;
     ui.spinner_on();
@@ -527,7 +533,9 @@ pub fn run_oneshot(
             println!();
         }
     };
+    crate::ctrlc::set_turn_running(true);
     let result = session.run_turn(prompt, &mut confirm_fn, &mut on_event);
+    crate::ctrlc::set_turn_running(false);
     ui.spinner_off();
     ui.stream_flush();
     let stats = result?;
