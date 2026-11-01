@@ -1,0 +1,26 @@
+[package]
+name = "nah-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/canoheil/not-a-harness"
+description = "nah - native desktop window for the nah web GUI (Tauri shell)"
+
+# Deliberately detached from the root workspace: the product itself stays
+# std-only with zero dependencies. Only this thin window shell wraps the
+# Tauri webview around the exact same GUI server, and it builds in CI.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+nah-cli = { path = "../cli" }
+nah-core = { path = "../core" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

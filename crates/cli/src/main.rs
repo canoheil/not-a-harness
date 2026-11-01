@@ -1,19 +1,12 @@
 //! `nah` - terminal front-end.
 
-mod ctrlc;
-mod gui;
-mod repl;
-mod setup;
-mod spinner;
-mod ui;
-mod wrap;
-
 use std::io::IsTerminal;
 
 use nah_core::config;
 use nah_core::provider;
 
-use ui::Ui;
+use nah_cli::ui::Ui;
+use nah_cli::{ctrlc, gui, repl, setup};
 
 fn main() {
     ctrlc::install();

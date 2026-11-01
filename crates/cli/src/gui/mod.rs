@@ -828,8 +828,10 @@ fn chat_handler(
 // entry point
 // ---------------------------------------------------------------------------
 
-/// Serve the web GUI until the process is stopped.
-pub fn serve(cfg: NahConfig, port: u16) -> Result<(), CoreError> {
+/// Serve the web GUI on an already-bound listener until the process is
+/// stopped. The desktop shell uses this: it picks its own port and opens
+/// a native window on the URL.
+pub fn serve_listener(listener: TcpListener, cfg: NahConfig) -> Result<(), CoreError> {
     let provider = connect(cfg.provider, &cfg.url)?;
     let mut tools = ToolKit::new(cfg.root.clone(), cfg.max_tool_bytes);
     for w in tools.load_custom_tools(&tools_dir()) {
@@ -878,13 +880,6 @@ pub fn serve(cfg: NahConfig, port: u16) -> Result<(), CoreError> {
         };
     }
 
-    let bind = std::env::var("NAH_GUI_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let listener = TcpListener::bind((bind.as_str(), port))
-        .map_err(|e| CoreError::Tool(format!("cannot bind GUI server on port {port}: {e}")))?;
-    let url = format!("http://127.0.0.1:{port}");
-    println!("nah GUI listening at {url}");
-    open_browser(&url);
-
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let engine = Arc::clone(&engine);
@@ -894,6 +889,17 @@ pub fn serve(cfg: NahConfig, port: u16) -> Result<(), CoreError> {
         });
     }
     Ok(())
+}
+
+/// Serve the web GUI in the user's browser until the process is stopped.
+pub fn serve(cfg: NahConfig, port: u16) -> Result<(), CoreError> {
+    let bind = std::env::var("NAH_GUI_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let listener = TcpListener::bind((bind.as_str(), port))
+        .map_err(|e| CoreError::Tool(format!("cannot bind GUI server on port {port}: {e}")))?;
+    let url = format!("http://127.0.0.1:{port}");
+    println!("nah GUI listening at {url}");
+    open_browser(&url);
+    serve_listener(listener, cfg)
 }
 
 /// Best-effort browser launch; a failure is never fatal.

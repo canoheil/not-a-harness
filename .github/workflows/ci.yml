@@ -58,6 +58,28 @@ jobs:
         run: |
           ls -la target/release/nah* | awk '{print $5, $9}'
 
+  desktop:
+    name: desktop shell (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+
+      - name: Build desktop shell
+        run: cargo build --release --manifest-path crates/desktop/Cargo.toml
+
   e2e:
     name: e2e against mock Ollama
     runs-on: ubuntu-latest
