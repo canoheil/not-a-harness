@@ -43,6 +43,12 @@ pub struct ToolBlockFilter {
 /// its closing tag and letting the rest of the message through.
 const XML_HIDE_CAP: usize = 40;
 
+impl Default for ToolBlockFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolBlockFilter {
     pub fn new() -> ToolBlockFilter {
         ToolBlockFilter {

@@ -156,7 +156,14 @@ This starts a small local server and opens the interface in your browser — a d
 - **permission-mode switcher** and a live context meter;
 - typing `/` in the composer opens a command palette that triggers the same controls — slash input never reaches the model.
 
-Served on `http://127.0.0.1:8787` (change the port with `--port <n>`). Everything runs locally — no external services, no CDNs. A native desktop window (Tauri) wrapping the same interface is on the roadmap.
+Served on `http://127.0.0.1:8787` (change the port with `--port <n>`). Everything runs locally — no external services, no CDNs.
+
+**Desktop window** — prefer a real window over a browser tab? Each release ships `nah-desktop`, a small native shell (Tauri) that runs the exact same interface in its own window:
+
+1. download `nah-desktop-<your platform>` from the [releases page](https://github.com/canoheil/not-a-harness/releases/latest);
+2. unzip and run `nah-desktop`.
+
+No browser, no port to type — it starts the embedded server itself. The browser version (`nah --gui`) keeps working alongside; both share the same settings.
 
 **Permission modes** (the GUI switcher, or `/mode` in the terminal):
 
