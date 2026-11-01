@@ -216,11 +216,11 @@ async function send() {
 
 function setBusy(v) {
   busy = v;
-  // while a turn runs the Send button becomes Stop (always clickable)
+  // while a turn runs the send button becomes Stop (always clickable)
   sendBtn.disabled = false;
   sendBtn.classList.toggle("stop", v);
+  sendBtn.title = v ? "stop this turn" : "send";
   document.getElementById("s-busy").textContent = v ? "working…" : "";
-  sendBtn.textContent = v ? "Stop" : "Send";
   for (const id of ["tb-new", "tb-compact"]) {
     document.getElementById(id).disabled = v;
   }
@@ -228,7 +228,6 @@ function setBusy(v) {
 
 async function stopTurn() {
   sendBtn.disabled = true;
-  sendBtn.textContent = "Stopping…";
   try {
     await fetch("/api/stop", {
       method: "POST",
