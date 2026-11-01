@@ -4,6 +4,8 @@
 //! (`nah --gui`) on a free loopback port and points a native webview at
 //! it - one code path, one interface, no browser chrome.
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::net::TcpListener;
 
 use tauri::{Url, WebviewUrl, WebviewWindowBuilder};

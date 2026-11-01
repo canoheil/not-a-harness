@@ -49,9 +49,12 @@
       <div class="composer">
         <div class="input-wrap">
           <div class="palette" id="palette"></div>
-          <textarea id="input" rows="1" placeholder="Ask nah to build something… (Enter to send · / for commands)"></textarea>
+          <textarea id="input" rows="1" title="Enter to send · Shift+Enter for a new line · / for commands" placeholder="Ask nah to build something…"></textarea>
         </div>
-        <button class="btn primary send" id="send">Send</button>
+        <button class="send" id="send" title="send">
+          <svg class="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          <svg class="i-stop" viewBox="0 0 24 24"><rect x="7.5" y="7.5" width="9" height="9" rx="1.5"/></svg>
+        </button>
       </div>
     </footer>
   </div>

@@ -254,6 +254,20 @@ impl<'a> Session<'a> {
             let stored = store_reply(&reply, stopped, &parsed);
 
             if parsed.actions.is_empty() || stopped {
+                // An empty reply is not an answer: small models go silent
+                // after a failed or blocked tool call. Ask again instead
+                // of ending the turn with "no final text".
+                if !stopped && stored.trim().is_empty() {
+                    on_event(&Event::Info(
+                        "[warn] the model produced no text - asking again".into(),
+                    ));
+                    self.history.push(ChatMessage::user(
+                        "[SYSTEM] Your reply was empty. Answer the user's message now \
+                         in plain text - no tools, no markers."
+                            .to_string(),
+                    ));
+                    continue;
+                }
                 self.history.push(ChatMessage::assistant(stored));
                 if stopped {
                     on_event(&Event::Info("[stopped] turn cancelled by user".to_string()));
@@ -742,6 +756,37 @@ mod tests {
         .unwrap();
         assert_eq!(done2, 1);
         assert_eq!(s2.history.len(), 1, "only the user message is kept");
+    }
+
+    #[test]
+    fn empty_replies_get_a_nudge_not_a_dead_end() {
+        let dir = std::env::temp_dir().join("nah_test_empty_nudge");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // the model goes silent twice, then finally answers
+        let replies = vec![
+            "".to_string(),
+            "   ".to_string(),
+            "hello there!".to_string(),
+        ];
+        let mut s = session_with(replies, &dir);
+        let mut infos = Vec::new();
+        s.run_turn("hello", &mut |_: &ConfirmRequest| true, &mut |ev| {
+            if let Event::Info(m) = ev {
+                infos.push(m.clone());
+            }
+        })
+        .unwrap();
+        // the turn keeps going until real text arrives
+        let last = s.history.last().unwrap();
+        assert_eq!(last.role, crate::provider::Role::Assistant);
+        assert!(last.content.contains("hello there!"));
+        let nudges = s
+            .history
+            .iter()
+            .filter(|m| m.content.contains("Your reply was empty"))
+            .count();
+        assert_eq!(nudges, 2, "one nudge per empty reply: {infos:?}");
     }
 
     #[test]
