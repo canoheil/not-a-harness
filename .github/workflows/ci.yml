@@ -83,9 +83,9 @@ jobs:
           set +e
           cargo build --release --manifest-path crates/desktop/Cargo.toml > build_out.txt 2>&1
           code=$?
-          echo "=== env: $(uname -s) ===" > ann.txt
-          tail -70 build_out.txt >> ann.txt
-          awk '{gsub(/%/,"%25"); printf "::error::%s\n", $0}' ann.txt
+          echo "uname: $(uname -s)" > ann.txt
+          tail -40 build_out.txt >> ann.txt
+          awk 'BEGIN{printf "::error::"} {gsub(/%/,"%25"); printf "%s%0A", $0} END{print ""}' ann.txt
           exit $code
 
   e2e:
