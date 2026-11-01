@@ -78,15 +78,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
 
       - name: Build desktop shell
-        shell: bash
-        run: |
-          set +e
-          cargo build --release --manifest-path crates/desktop/Cargo.toml > build_out.txt 2>&1
-          code=$?
-          echo "uname: $(uname -s)" > ann.txt
-          tail -40 build_out.txt >> ann.txt
-          awk 'BEGIN{printf "::error::"} {gsub(/%/,"%25"); printf "%s%%0A", $0} END{print ""}' ann.txt
-          exit $code
+        run: cargo build --release --manifest-path crates/desktop/Cargo.toml
 
   e2e:
     name: e2e against mock Ollama
