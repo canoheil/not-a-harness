@@ -85,7 +85,7 @@ jobs:
           code=$?
           echo "uname: $(uname -s)" > ann.txt
           tail -40 build_out.txt >> ann.txt
-          awk 'BEGIN{printf "::error::"} {gsub(/%/,"%25"); printf "%s%0A", $0} END{print ""}' ann.txt
+          awk 'BEGIN{printf "::error::"} {gsub(/%/,"%25"); printf "%s%%0A", $0} END{print ""}' ann.txt
           exit $code
 
   e2e:
