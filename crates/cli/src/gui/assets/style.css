@@ -314,6 +314,15 @@ button.tb {
   transition: all .15s;
 }
 button.tb:hover { border-color: var(--purple); }
+.btn.stop {
+  background: #ff5f56;
+  color: #fff;
+}
+.btn.stop:hover:not(:disabled) {
+  background: #ff7b73;
+  transform: translateY(-1px);
+}
+
 button.tb svg {
   width: 13px;
   height: 13px;

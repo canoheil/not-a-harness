@@ -152,6 +152,7 @@ This starts a small local server and opens the interface in your browser — a d
 - **tools panel** — enable/disable any tool (built-in or custom) and reload custom tool files;
 - **files panel** — the working set with content previews;
 - **inline tool-approval cards** — diffs and resolved commands with Approve/Reject (approvals work mid-turn);
+- **Stop button** — while the model is working, Send becomes Stop; one click cancels the running turn and unwinds cleanly;
 - **permission-mode switcher** and a live context meter;
 - typing `/` in the composer opens a command palette that triggers the same controls — slash input never reaches the model.
 
@@ -195,6 +196,8 @@ Options:
 ```
 
 ### REPL commands
+
+`Ctrl+C` cancels a running turn; at an idle prompt it exits.
 
 | Command | Description |
 |---|---|

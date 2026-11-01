@@ -216,12 +216,26 @@ async function send() {
 
 function setBusy(v) {
   busy = v;
-  sendBtn.disabled = v;
+  // while a turn runs the Send button becomes Stop (always clickable)
+  sendBtn.disabled = false;
+  sendBtn.classList.toggle("stop", v);
   document.getElementById("s-busy").textContent = v ? "working…" : "";
-  sendBtn.textContent = v ? "…" : "Send";
+  sendBtn.textContent = v ? "Stop" : "Send";
   for (const id of ["tb-new", "tb-compact"]) {
     document.getElementById(id).disabled = v;
   }
+}
+
+async function stopTurn() {
+  sendBtn.disabled = true;
+  sendBtn.textContent = "Stopping…";
+  try {
+    await fetch("/api/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+  } catch (e) { /* the stream will end anyway */ }
 }
 
 /* ---------- toolbar actions ---------- */
@@ -568,7 +582,7 @@ input.addEventListener("keydown", (e) => {
   }
 });
 input.addEventListener("blur", () => setTimeout(() => palette.classList.remove("open"), 150));
-sendBtn.addEventListener("click", send);
+sendBtn.addEventListener("click", () => (busy ? stopTurn() : send()));
 
 document.getElementById("tb-new").addEventListener("click", newChat);
 document.getElementById("tb-compact").addEventListener("click", compact);

@@ -5,7 +5,9 @@ use crate::error::CoreError;
 use crate::protocol::{self, Action};
 use crate::provider::{ChatMessage, ChatOptions, ChatRequest, LlmProvider};
 use crate::tools::{ConfirmRequest, ToolKit, ToolOutput};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Generation statistics for one completed turn: estimated tokens the
 /// model produced and the time spent generating (first token to last
@@ -91,6 +93,7 @@ pub struct Session<'a> {
     pub context: ContextManager,
     pub history: Vec<ChatMessage>,
     pinned_task: Option<String>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl<'a> Session<'a> {
@@ -107,7 +110,35 @@ impl<'a> Session<'a> {
             context,
             history: Vec::new(),
             pinned_task: None,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Shared stop flag: set it to cancel the running turn at the next
+    /// streamed token or tool boundary.
+    pub fn stop_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    /// Use an externally owned stop flag (e.g. the Ctrl+C handler's).
+    pub fn bind_stop_handle(&mut self, handle: Arc<AtomicBool>) {
+        self.cancel = handle;
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    /// The turn was cancelled: report it and finish without touching
+    /// history further.
+    fn finish_stopped(
+        &self,
+        stats: TurnStats,
+        on_event: &mut dyn FnMut(&Event<'_>),
+    ) -> Result<TurnStats, CoreError> {
+        on_event(&Event::Info("[stopped] turn cancelled by user".to_string()));
+        on_event(&Event::TurnDone);
+        Ok(stats)
     }
 
     pub fn reset(&mut self) {
@@ -151,10 +182,14 @@ impl<'a> Session<'a> {
 
         // duplicate-call loop breaker state (per turn)
         let mut action_counts: HashMap<String, usize> = HashMap::new();
+        let mut failed_sigs: HashSet<String> = HashSet::new();
         // generation statistics (per reply: first token -> last token)
         let mut stats = TurnStats::default();
 
         for _step in 0..self.config.max_steps {
+            if self.cancelled() {
+                return self.finish_stopped(stats, on_event);
+            }
             // compaction keeps old turns from eating the window
             if self.context.wants_compaction(&self.history) {
                 match self.context.compact(
@@ -185,11 +220,13 @@ impl<'a> Session<'a> {
                 options: &self.config.options,
             };
             let mut first_token: Option<std::time::Instant> = None;
+            let cancel = Arc::clone(&self.cancel);
             let reply = self.provider.chat_stream(&req, &mut |delta| {
                 if first_token.is_none() {
                     first_token = Some(std::time::Instant::now());
                 }
-                on_event(&Event::Delta(delta))
+                on_event(&Event::Delta(delta));
+                !cancel.load(Ordering::SeqCst)
             })?;
             if let Some(u) = self.provider.take_usage() {
                 self.context.observe_usage(u.prompt_tokens, &messages);
@@ -199,20 +236,28 @@ impl<'a> Session<'a> {
                 stats.gen_secs += t.elapsed().as_secs_f64();
             }
 
+            let stopped = self.cancelled();
             let parsed = protocol::parse(&reply);
-            for _block in &parsed.invalid_blocks {
-                on_event(&Event::Info(
-                    "[warn] model emitted an invalid tool block (ignored) - check the tool name and required parameters, then retry".to_string(),
-                ));
+            if !stopped {
+                for _block in &parsed.invalid_blocks {
+                    on_event(&Event::Info(
+                        "[warn] model emitted an invalid tool block (ignored) - check the tool name and required parameters, then retry".to_string(),
+                    ));
+                }
             }
 
             // store the reply clean: XML calls normalized to fenced blocks
             // (so the model learns the right format from its own history),
             // echoed internal markers and runaway repetition removed.
-            let stored = protocol::sanitize_text(&protocol::normalize_function_calls(&reply), 40);
+            // A cancelled reply keeps prose only - tool blocks that were
+            // never executed must not linger in the transcript.
+            let stored = store_reply(&reply, stopped, &parsed);
 
-            if parsed.actions.is_empty() {
+            if parsed.actions.is_empty() || stopped {
                 self.history.push(ChatMessage::assistant(stored));
+                if stopped {
+                    on_event(&Event::Info("[stopped] turn cancelled by user".to_string()));
+                }
                 on_event(&Event::TurnDone);
                 return Ok(stats);
             }
@@ -220,26 +265,44 @@ impl<'a> Session<'a> {
             self.history.push(ChatMessage::assistant(stored));
 
             let mut results = String::from("[TOOL RESULTS]");
+            let mut ran_any = false;
             for action in &parsed.actions {
+                if self.cancelled() {
+                    break;
+                }
                 on_event(&Event::Action(action));
+                ran_any = true;
                 // Loop breaker: local models sometimes get stuck repeating
                 // the same call. A repeat gets a hint; a third identical
-                // call is blocked so the turn cannot spin forever.
+                // call is blocked so the turn cannot spin forever. An exact
+                // repeat of a call that already FAILED is blocked right
+                // away - it cannot succeed on the second try.
                 let sig = action_signature(action);
                 let n = *action_counts.get(&sig).unwrap_or(&0);
-                let output = if n >= 2 {
+                let failed_before = failed_sigs.contains(&sig);
+                let output = if n >= 2 || failed_before {
                     ToolOutput {
                         verb: action.verb(),
                         path: action.path().to_string(),
-                        body: "duplicate call blocked: this exact action already ran twice \
-                               in this turn and had no further effect. Do the NEXT step, \
-                               or finish with a plain-text answer."
-                            .to_string(),
+                        body: if failed_before {
+                            "duplicate call blocked: this exact action already failed in \
+                             this turn and repeating it cannot succeed. Try a different \
+                             path or approach, or finish with a plain-text answer."
+                                .to_string()
+                        } else {
+                            "duplicate call blocked: this exact action already ran twice \
+                             in this turn and had no further effect. Do the NEXT step, \
+                             or finish with a plain-text answer."
+                                .to_string()
+                        },
                         is_error: true,
                         changed: false,
                     }
                 } else {
                     let mut out = self.tools.run(action, confirm);
+                    if out.is_error {
+                        failed_sigs.insert(sig.clone());
+                    }
                     if n == 1 {
                         out.body = if out.is_error {
                             format!(
@@ -259,6 +322,7 @@ impl<'a> Session<'a> {
                     if out.changed {
                         // real state change: the loop breaker resets
                         action_counts.clear();
+                        failed_sigs.clear();
                     }
                     out
                 };
@@ -280,7 +344,9 @@ impl<'a> Session<'a> {
                 results.push_str(&output.to_model_message());
                 results.push('\n');
             }
-            self.history.push(ChatMessage::user(results));
+            if ran_any {
+                self.history.push(ChatMessage::user(results));
+            }
         }
 
         on_event(&Event::Info(
@@ -306,11 +372,13 @@ impl<'a> Session<'a> {
             options: &self.config.options,
         };
         let mut first_token: Option<std::time::Instant> = None;
+        let cancel = Arc::clone(&self.cancel);
         let reply = self.provider.chat_stream(&req, &mut |delta| {
             if first_token.is_none() {
                 first_token = Some(std::time::Instant::now());
             }
-            on_event(&Event::Delta(delta))
+            on_event(&Event::Delta(delta));
+            !cancel.load(Ordering::SeqCst)
         })?;
         if let Some(u) = self.provider.take_usage() {
             self.context.observe_usage(u.prompt_tokens, &messages);
@@ -319,17 +387,40 @@ impl<'a> Session<'a> {
         if let Some(t) = first_token {
             stats.gen_secs += t.elapsed().as_secs_f64();
         }
+        let stopped = self.cancelled();
         // store the final answer clean as well - a reply that is only
         // echoed markers is no reply at all (the user must see that).
-        let stored = protocol::sanitize_text(&protocol::normalize_function_calls(&reply), 40);
-        if protocol::parse(&stored).prose.trim().is_empty() {
+        let parsed = protocol::parse(&reply);
+        let stored = store_reply(&reply, stopped, &parsed);
+        if !stopped && parsed.prose.trim().is_empty() {
             on_event(&Event::Info(
                 "[warn] the model produced no final answer text".into(),
             ));
         }
         self.history.push(ChatMessage::assistant(stored));
+        if stopped {
+            on_event(&Event::Info("[stopped] turn cancelled by user".to_string()));
+        }
         on_event(&Event::TurnDone);
         Ok(stats)
+    }
+}
+
+/// How a reply is kept in history: normally the clean normalized text
+/// (XML calls normalized to fenced blocks, echoed internal markers and
+/// runaway repetition removed); when the turn was cancelled, the prose
+/// only - tool blocks that were never executed must not linger - plus a
+/// stop note so the model knows where its answer was cut.
+fn store_reply(reply: &str, stopped: bool, parsed: &protocol::ParsedOutput) -> String {
+    if stopped {
+        let prose = protocol::sanitize_text(parsed.prose.trim(), 40);
+        if prose.is_empty() {
+            "(turn stopped by user)".to_string()
+        } else {
+            format!("{prose}\n\n(turn stopped by user)")
+        }
+    } else {
+        protocol::sanitize_text(&protocol::normalize_function_calls(reply), 40)
     }
 }
 
@@ -391,7 +482,7 @@ mod tests {
         fn chat_stream(
             &mut self,
             _req: &ChatRequest<'_>,
-            on_delta: &mut dyn FnMut(&str),
+            on_delta: &mut dyn FnMut(&str) -> bool,
         ) -> Result<String, CoreError> {
             let i = *self.idx.borrow();
             let reply = self
@@ -419,7 +510,7 @@ mod tests {
         fn chat_stream(
             &mut self,
             _req: &ChatRequest<'_>,
-            on_delta: &mut dyn FnMut(&str),
+            on_delta: &mut dyn FnMut(&str) -> bool,
         ) -> Result<String, CoreError> {
             on_delta(&self.reply);
             Ok(self.reply.clone())
@@ -579,6 +670,78 @@ mod tests {
         // 2nd identical call gets a note, 3rd+ are blocked
         assert_eq!(notes.len(), 1, "exactly one repeat-note expected");
         assert!(blocks >= 1, "duplicates must be blocked");
+    }
+
+    #[test]
+    fn failed_call_is_never_re_run() {
+        let dir = std::env::temp_dir().join("nah_test_failed_repeat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // the model hammers LIST_DIR on a path that does not exist
+        let replies = vec!["```tool\nLIST_DIR\npath: no_such_dir\n```".to_string(); 4];
+        let mut s = session_with(replies, &dir);
+        let mut ran = 0;
+        let mut blocked = 0;
+        s.run_turn("go", &mut |_: &ConfirmRequest| true, &mut |ev| {
+            if let Event::ToolResult(o) = ev {
+                if o.body.contains("path not found") {
+                    ran += 1;
+                }
+                if o.body.contains("already failed") {
+                    blocked += 1;
+                }
+            }
+        })
+        .unwrap();
+        // the first call runs and fails; every exact repeat is refused
+        // without touching the file system
+        assert_eq!(ran, 1, "the failed call must execute exactly once");
+        assert!(blocked >= 1, "failed repeats must be blocked");
+    }
+
+    #[test]
+    fn stop_handle_cancels_the_turn() {
+        let dir = std::env::temp_dir().join("nah_test_stop");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let replies = vec!["hello there friend".to_string()];
+        let mut s = session_with(replies, &dir);
+        // the user hits stop as soon as the reply starts streaming
+        let stop = s.stop_handle();
+        let mut infos = Vec::new();
+        let mut done = 0;
+        s.run_turn("hi", &mut |_: &ConfirmRequest| true, &mut |ev| match ev {
+            Event::Delta(_) => stop.store(true, Ordering::SeqCst),
+            Event::Info(m) => infos.push(m.clone()),
+            Event::TurnDone => done += 1,
+            _ => {}
+        })
+        .unwrap();
+        assert_eq!(done, 1, "a cancelled turn must still finish cleanly");
+        assert!(
+            infos.iter().any(|m| m.contains("[stopped]")),
+            "the user must be told the turn was stopped: {infos:?}"
+        );
+        // the partial reply is kept as prose with a stop note
+        let last = s.history.last().unwrap();
+        assert_eq!(last.role, crate::provider::Role::Assistant);
+        assert!(last.content.contains("hello there friend"));
+        assert!(last.content.contains("stopped by user"));
+
+        // a turn that starts already-cancelled stops before touching
+        // the model: no assistant reply is recorded at all
+        let replies2 = vec!["never used".to_string()];
+        let mut s2 = session_with(replies2, &dir);
+        s2.stop_handle().store(true, Ordering::SeqCst);
+        let mut done2 = 0;
+        s2.run_turn("hi", &mut |_: &ConfirmRequest| true, &mut |ev| {
+            if let Event::TurnDone = ev {
+                done2 += 1;
+            }
+        })
+        .unwrap();
+        assert_eq!(done2, 1);
+        assert_eq!(s2.history.len(), 1, "only the user message is kept");
     }
 
     #[test]
