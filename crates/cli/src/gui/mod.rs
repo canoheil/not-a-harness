@@ -571,8 +571,8 @@ fn config_handler(
         let path = std::path::PathBuf::from(&root);
         if path.is_dir() {
             engine.cfg.root = path.clone();
-            engine.session.tools.set_root(path);
-            state.inner.lock().unwrap().status.root = root;
+            engine.session.tools.set_root(path.clone());
+            state.inner.lock().unwrap().status.root = nah_core::tools::display_path(&path);
         } else {
             respond(
                 stream,
@@ -841,7 +841,7 @@ pub fn serve(cfg: NahConfig, port: u16) -> Result<(), CoreError> {
                 nah_core::provider::ProviderKind::Ollama => "ollama".to_string(),
                 nah_core::provider::ProviderKind::OpenAiCompat => "openai".to_string(),
             },
-            root: cfg.root.display().to_string(),
+            root: nah_core::tools::display_path(&cfg.root),
             ctx_tokens: cfg.ctx_tokens,
             usage_tokens: 0,
             messages: 0,

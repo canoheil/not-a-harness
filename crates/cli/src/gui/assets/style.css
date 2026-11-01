@@ -139,7 +139,8 @@ header {
   border: 1px solid var(--border);
   border-radius: 11px;
   background: var(--surface);
-  margin: 10px 0;
+  max-width: 860px;
+  margin: 10px auto;
   overflow: hidden;
 }
 
@@ -265,7 +266,7 @@ footer {
 }
 
 textarea {
-  flex: 1;
+  width: 100%;
   resize: none;
   border: 1px solid var(--border);
   border-radius: 11px;
@@ -313,6 +314,17 @@ button.tb {
   transition: all .15s;
 }
 button.tb:hover { border-color: var(--purple); }
+button.tb svg {
+  width: 13px;
+  height: 13px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: -2px;
+  margin-right: 5px;
+}
 button.tb:disabled { opacity: .45; cursor: not-allowed; }
 
 .tsep { width: 1px; height: 20px; background: var(--border); }
