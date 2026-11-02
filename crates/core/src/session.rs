@@ -3,7 +3,7 @@
 use crate::context::ContextManager;
 use crate::error::CoreError;
 use crate::protocol::{self, Action};
-use crate::provider::{ChatMessage, ChatOptions, ChatRequest, LlmProvider};
+use crate::provider::{ChatMessage, ChatOptions, ChatRequest, LlmProvider, Role};
 use crate::tools::{ConfirmRequest, ToolKit, ToolOutput};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,7 +82,12 @@ pub fn system_intro(root: &str) -> String {
          Never claim a step succeeded unless a tool result confirms it, and\n\
          never fabricate tool results or file contents. For simple greetings\n\
          or questions that need no file work, reply in plain text without\n\
-         calling any tools."
+         calling any tools.\n\n\
+         You have a persistent project memory file at .nah/memory.md in the\
+         project root. When it exists its content is shown as [PROJECT MEMORY]\
+         below. Update it with the file tools when you learn durable project\
+         facts - architecture, conventions, decisions, unfinished work - so\
+         they survive context compaction. Keep every entry terse."
     )
 }
 
@@ -92,6 +97,10 @@ pub struct Session<'a> {
     pub tools: ToolKit,
     pub context: ContextManager,
     pub history: Vec<ChatMessage>,
+    /// Append-only transcript mirror: every message this session ever
+    /// stored, unaffected by compaction. History persistence reads it so
+    /// saved conversations stay complete.
+    pub log: Vec<ChatMessage>,
     pinned_task: Option<String>,
     cancel: Arc<AtomicBool>,
 }
@@ -109,9 +118,16 @@ impl<'a> Session<'a> {
             tools,
             context,
             history: Vec::new(),
+            log: Vec::new(),
             pinned_task: None,
             cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Store a message in both the working history and the transcript log.
+    fn push(&mut self, message: ChatMessage) {
+        self.history.push(message.clone());
+        self.log.push(message);
     }
 
     /// Shared stop flag: set it to cancel the running turn at the next
@@ -143,8 +159,33 @@ impl<'a> Session<'a> {
 
     pub fn reset(&mut self) {
         self.history.clear();
+        self.log.clear();
         self.context.reset();
         self.pinned_task = None;
+    }
+
+    /// Restore a saved conversation into this session (`/resume`). The
+    /// transcript becomes both the working history and the append-only
+    /// log; the original first user message pins the task again.
+    pub fn restore(&mut self, messages: Vec<ChatMessage>) {
+        self.pinned_task = messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.content.clone());
+        self.log = messages.clone();
+        self.history = messages;
+        self.context.reset();
+    }
+
+    /// The full system prompt: static intro (incl. the project-memory
+    /// instructions) plus the current [PROJECT MEMORY] block when the
+    /// project has one.
+    fn system_prompt(&self) -> String {
+        let intro = system_intro(&crate::tools::display_path(self.tools.root()));
+        match crate::memory::load_block(self.tools.root()) {
+            Some(block) => format!("{intro}\n\n{block}"),
+            None => intro,
+        }
     }
 
     /// Approximate context usage for the UI: (tokens, messages).
@@ -178,7 +219,7 @@ impl<'a> Session<'a> {
         if self.pinned_task.is_none() {
             self.pinned_task = Some(user_input.to_string());
         }
-        self.history.push(ChatMessage::user(user_input));
+        self.push(ChatMessage::user(user_input));
 
         // duplicate-call loop breaker state (per turn)
         let mut action_counts: HashMap<String, usize> = HashMap::new();
@@ -209,7 +250,7 @@ impl<'a> Session<'a> {
             }
 
             let messages = self.context.build(
-                &system_intro(&crate::tools::display_path(self.tools.root())),
+                &self.system_prompt(),
                 &protocol::tool_protocol_doc(self.tools.registry()),
                 self.pinned_task.as_deref(),
                 &self.history,
@@ -261,14 +302,14 @@ impl<'a> Session<'a> {
                     on_event(&Event::Info(
                         "[warn] the model produced no text - asking again".into(),
                     ));
-                    self.history.push(ChatMessage::user(
+                    self.push(ChatMessage::user(
                         "[SYSTEM] Your reply was empty. Answer the user's message now \
                          in plain text - no tools, no markers."
                             .to_string(),
                     ));
                     continue;
                 }
-                self.history.push(ChatMessage::assistant(stored));
+                self.push(ChatMessage::assistant(stored));
                 if stopped {
                     on_event(&Event::Info("[stopped] turn cancelled by user".to_string()));
                 }
@@ -276,7 +317,7 @@ impl<'a> Session<'a> {
                 return Ok(stats);
             }
 
-            self.history.push(ChatMessage::assistant(stored));
+            self.push(ChatMessage::assistant(stored));
 
             let mut results = String::from("[TOOL RESULTS]");
             let mut ran_any = false;
@@ -359,7 +400,7 @@ impl<'a> Session<'a> {
                 results.push('\n');
             }
             if ran_any {
-                self.history.push(ChatMessage::user(results));
+                self.push(ChatMessage::user(results));
             }
         }
 
@@ -368,14 +409,14 @@ impl<'a> Session<'a> {
         ));
         // Tell the model explicitly to stop calling tools - otherwise it
         // answers with yet another tool block that nobody can run.
-        self.history.push(ChatMessage::user(
+        self.push(ChatMessage::user(
             "[SYSTEM] Tool-call budget is exhausted. Do not request any tools. \
              Reply now with a plain-text final answer for the user, summarizing \
              what was done."
                 .to_string(),
         ));
         let messages = self.context.build(
-            &system_intro(&crate::tools::display_path(self.tools.root())),
+            &self.system_prompt(),
             &protocol::tool_protocol_doc(self.tools.registry()),
             self.pinned_task.as_deref(),
             &self.history,
@@ -411,7 +452,7 @@ impl<'a> Session<'a> {
                 "[warn] the model produced no final answer text".into(),
             ));
         }
-        self.history.push(ChatMessage::assistant(stored));
+        self.push(ChatMessage::assistant(stored));
         if stopped {
             on_event(&Event::Info("[stopped] turn cancelled by user".to_string()));
         }
@@ -888,5 +929,38 @@ mod tests {
         // division guard
         assert_eq!(TurnStats::default().tokens_per_sec(), 0.0);
         assert!(stats.tokens_per_sec() >= 0.0);
+    }
+
+    #[test]
+    fn log_mirror_survives_compaction_and_reset() {
+        let dir = std::env::temp_dir().join("nah_test_log_mirror");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // long messages so compaction has something to summarize away
+        let filler = "detail ".repeat(60);
+        let mut s = session_with(vec![format!("first {filler}"), "done.".into()], &dir);
+        s.run_turn("task one", &mut |_: &ConfirmRequest| true, &mut |_| {})
+            .unwrap();
+        assert_eq!(s.log.len(), s.history.len());
+        let full = s.log.len();
+        s.history.drain(..full.saturating_sub(1)); // simulate compaction
+        assert_eq!(s.log.len(), full, "log must not shrink with history");
+        s.reset();
+        assert!(s.log.is_empty());
+    }
+
+    #[test]
+    fn restore_sets_history_and_pinned_task() {
+        let dir = std::env::temp_dir().join("nah_test_restore");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = session_with(vec![], &dir);
+        s.restore(vec![
+            ChatMessage::user("the original request"),
+            ChatMessage::assistant("working on it"),
+        ]);
+        assert_eq!(s.history.len(), 2);
+        assert_eq!(s.log.len(), 2);
+        assert_eq!(s.pinned_task.as_deref(), Some("the original request"));
     }
 }
