@@ -20,6 +20,15 @@ impl Role {
             Role::Assistant => "assistant",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Role> {
+        match s {
+            "system" => Some(Role::System),
+            "user" => Some(Role::User),
+            "assistant" => Some(Role::Assistant),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

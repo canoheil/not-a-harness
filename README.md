@@ -29,6 +29,7 @@ It is built for locally-run models on modest hardware. The entire program is a s
 | 🎯 **Context management that fits** | Pinned task, rolling summary, and a file working set packed into a fixed budget. Token counts are calibrated against what the server actually reports. |
 | 🔒 **Safe by default** | Every write shows a diff and asks first; commands and custom tools show the exact resolved command. Paths are sandboxed to the project root. |
 | 🧩 **Custom tools** | Wrap domain-specific commands as plain-text tool files; toggle built-ins per workflow. The model only ever sees the tools that are enabled. |
+| 💾 **Persistent conversations** | Every chat is saved automatically; `/resume` continues any past conversation and `/history <text>` searches through all of them. A per-project memory file keeps durable notes in the model's context. |
 | ⚡ **Polished terminal UX** | Streaming output, per-turn speed and context meters, first-run setup wizard, and a one-shot mode for scripts and CI. |
 | 🖥 **Web GUI included** | `nah --gui` opens a local browser interface: chat, inline tool approvals, permission modes, live context meter. |
 
@@ -215,14 +216,17 @@ Options:
 | `/provider [url]` | scan for local servers or switch to another one |
 | `/setup` | re-run the setup wizard |
 | `/ctx [n]` | show or set the token budget |
-| `/history [n]` | show or set the trailing-message window |
+| `/history [text]` | browse saved conversations, or search them for `text` |
+| `/resume [n\|id]` | continue a saved conversation (no argument = most recent) |
+| `/tail [n]` | show or set the trailing-message window |
 | `/files` | files currently held in the working set |
 | `/tools [on\|off <name>\|reload]` | manage built-in and custom tools |
 | `/mode [name]` | permission mode: `read-only` / `confirm` / `auto` |
 | `/root [dir]` | show or change the project root |
 | `/compact` | summarize older history now |
-| `/reset` | start a fresh conversation |
+| `/reset` | start a fresh conversation (the old one is kept in history) |
 | `/undo` | reverse the last file change made by the model |
+| `/memory [clear]` | show or clear the project memory file |
 | `/clear` | clear the screen |
 | `/yes` / `/no` | toggle auto-approval for writes and commands |
 | `/exit` | quit (`Ctrl+C` also exits cleanly) |
@@ -316,6 +320,8 @@ Every request is assembled within a fixed token budget (`--ctx`, default 4096):
 3. **Pinned task** — the original request never leaves the context.
 4. **Working set** — contents of recently used files, newest first, bounded to ~80% of the budget.
 5. **Trailing history** — the last N messages verbatim (`--history`, default 5).
+
+When the project has a `.nah/memory.md` file, its content is pinned at the top of the system prompt as a **project memory** block (capped so it cannot crowd out the working set). The model maintains that file with the ordinary file tools, so durable facts - architecture, conventions, decisions - survive compaction and small context windows. Inspect or clear it with `/memory`.
 
 Token accounting is layered: a lightweight static estimator (non-ASCII text is weighted realistically) is continuously **calibrated against the server's own reported counts** (Ollama `prompt_eval_count`, OpenAI-compatible `usage`), so the budget tracks the real tokenizer of the loaded model — and resets when you switch models. The `context: ~N/M tokens` line after every turn shows where you stand.
 
