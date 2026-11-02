@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1207" width="100%" height="100%">
+  <defs>
+    <!-- main logo gradient: blue to purple -->
+    <linearGradient id="horseGradient" x1="450" y1="113" x2="550" y2="1075" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2279CA" />
+      <stop offset="45%" stop-color="#4863B8" />
+      <stop offset="100%" stop-color="#7157A5" />
+    </linearGradient>
+  </defs>
+
+  <!-- logo parts -->
+  <g fill="url(#horseGradient)" fill-rule="evenodd">
+
+    <!-- head and neck, with eye and nostril cutouts -->
+    <path d="
+      M 678,113
+      L 657,250
+      L 811,439
+      L 940,770
+      L 879,868
+      L 785,868
+      L 732,751
+      L 530,650
+      L 459,514
+      L 503,678
+      L 589,738
+      L 709,1013
+      L 581,1075
+      L 106,901
+      L 365,418
+      L 544,224
+      Z
+      M 616,405
+      L 658,487
+      L 734,513
+      L 770,551
+      L 742,492
+      Z
+      M 875,725
+      L 856,759
+      L 877,811
+      L 896,777
+      Z
+    " />
+
+    <!-- back ear -->
+    <polygon points="784,180 726,307 682,241" />
+
+    <!-- mane: upper -->
+    <polygon points="518,224 369,390 124,482 191,372 358,297 263,298 337,238" />
+
+    <!-- mane: middle -->
+    <polygon points="301,453 225,603 38,728 88,575" />
+
+    <!-- mane: lower -->
+    <polygon points="191,671 54,929 35,822" />
+
+  </g>
+</svg>
