@@ -68,6 +68,16 @@ pub enum Action {
         path: String,
         to: String,
     },
+    /// Case-insensitive substring search inside files.
+    Search {
+        path: String,
+        query: String,
+    },
+    /// Wildcard file listing (`*`, `?`, `**`).
+    FindFiles {
+        path: String,
+        pattern: String,
+    },
     /// A user-defined tool call: free-form name + `key: value` params.
     Custom {
         name: String,
@@ -85,6 +95,8 @@ impl Action {
             Action::RunCommand { .. } => "RUN_COMMAND".to_string(),
             Action::DeleteFile { .. } => "DELETE_FILE".to_string(),
             Action::MoveFile { .. } => "MOVE_FILE".to_string(),
+            Action::Search { .. } => "SEARCH".to_string(),
+            Action::FindFiles { .. } => "FIND_FILES".to_string(),
             Action::Custom { name, .. } => name.clone(),
         }
     }
@@ -96,7 +108,9 @@ impl Action {
             | Action::EditFile { path, .. }
             | Action::ListDir { path }
             | Action::DeleteFile { path }
-            | Action::MoveFile { path, .. } => path,
+            | Action::MoveFile { path, .. }
+            | Action::Search { path, .. }
+            | Action::FindFiles { path, .. } => path,
             Action::RunCommand { command, .. } => command,
             Action::Custom { .. } => "",
         }
@@ -209,6 +223,8 @@ pub fn action_label(action: &Action) -> String {
             )
         }
         Action::ListDir { path } => format!("LIST_DIR {path}"),
+        Action::Search { path, query } => format!("SEARCH {path} ('{query}')"),
+        Action::FindFiles { path, pattern } => format!("FIND_FILES {path} ({pattern})"),
         Action::DeleteFile { path } => format!("DELETE_FILE {path}"),
         Action::MoveFile { path, to } => format!("MOVE_FILE {path} -> {to}"),
         Action::Custom { name, params } => {
@@ -317,8 +333,8 @@ mod doc_tests {
         );
         assert_eq!(
             p.actions.len(),
-            9,
-            "expected 7 syntax examples + 2 example-of-change blocks: {:?}",
+            11,
+            "expected 9 syntax examples + 2 example-of-change blocks: {:?}",
             p.actions
         );
         assert!(matches!(p.actions[0], Action::ReadFile { .. }));
@@ -328,8 +344,10 @@ mod doc_tests {
         assert!(matches!(p.actions[4], Action::RunCommand { .. }));
         assert!(matches!(p.actions[5], Action::DeleteFile { .. }));
         assert!(matches!(p.actions[6], Action::MoveFile { .. }));
-        assert!(matches!(p.actions[7], Action::ReadFile { .. }));
-        assert!(matches!(p.actions[8], Action::EditFile { .. }));
+        assert!(matches!(p.actions[7], Action::Search { .. }));
+        assert!(matches!(p.actions[8], Action::FindFiles { .. }));
+        assert!(matches!(p.actions[9], Action::ReadFile { .. }));
+        assert!(matches!(p.actions[10], Action::EditFile { .. }));
     }
 
     /// Only enabled tools reach the prompt - disabling one must drop

@@ -463,6 +463,8 @@ fn action_signature(action: &Action) -> String {
         Action::ListDir { path } => format!("L:{path}"),
         Action::DeleteFile { path } => format!("D:{path}"),
         Action::MoveFile { path, to } => format!("M:{path}->{to}"),
+        Action::Search { path, query } => format!("S:{path}:{query}"),
+        Action::FindFiles { path, pattern } => format!("F:{path}:{pattern}"),
         Action::Custom { name, params } => format!("X:{name}:{params:?}"),
         Action::RunCommand {
             command,

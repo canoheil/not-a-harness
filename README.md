@@ -169,7 +169,7 @@ No browser, no port to type — it starts the embedded server itself. The browse
 
 | Mode | Behaviour |
 |---|---|
-| `read-only` | Only `READ_FILE` and `LIST_DIR` are visible and runnable; anything that can change state is refused. |
+| `read-only` | Only the pure-read tools (`READ_FILE`, `LIST_DIR`, `SEARCH`, `FIND_FILES`) are visible and runnable; anything that can change state is refused. |
 | `confirm` | *(default)* every write or command asks for approval. |
 | `auto` | Actions run without asking (same as `--yes`). |
 
@@ -210,7 +210,7 @@ Options:
 |---|---|
 | `/help` | list all commands |
 | `/status` | configuration and live context usage |
-| `/model [name]` | show or switch the model (switching starts a fresh conversation) |
+| `/model [name]` | switch the model (no name = cycle to the next one; switching starts a fresh conversation) |
 | `/models` | list the models available on the server |
 | `/provider [url]` | scan for local servers or switch to another one |
 | `/setup` | re-run the setup wizard |
@@ -222,6 +222,7 @@ Options:
 | `/root [dir]` | show or change the project root |
 | `/compact` | summarize older history now |
 | `/reset` | start a fresh conversation |
+| `/undo` | reverse the last file change made by the model |
 | `/clear` | clear the screen |
 | `/yes` / `/no` | toggle auto-approval for writes and commands |
 | `/exit` | quit (`Ctrl+C` also exits cleanly) |
@@ -271,6 +272,8 @@ command: cargo test
 | `RUN_COMMAND` | run a shell command in the project root (sandboxed, timeout-capped) |
 | `DELETE_FILE` | delete a file (with confirmation and preview) |
 | `MOVE_FILE` | move or rename a file (never overwrites) |
+| `SEARCH` | case-insensitive text search across project files (`file:line: text`) |
+| `FIND_FILES` | list files by wildcard pattern (`*`, `?`, `**`) |
 
 **Rules the harness enforces:**
 

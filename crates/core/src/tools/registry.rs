@@ -51,7 +51,7 @@ impl Mode {
 /// Tools that can change state. Everything except the two pure-read
 /// tools counts - custom tools run shell commands, so they do too.
 pub fn is_state_changing(name: &str) -> bool {
-    !matches!(name, "READ_FILE" | "LIST_DIR")
+    !matches!(name, "READ_FILE" | "LIST_DIR" | "SEARCH" | "FIND_FILES")
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +157,20 @@ to: new.txt
 ```
 Move or rename a file. The user is asked to confirm before anything changes.";
 
+const DOC_SEARCH: &str = r"```tool
+SEARCH
+path: src
+query: parse_config
+```
+Search text inside files under a directory (case-insensitive substring). Returns `file:line: text` matches. Use this to find where something lives instead of reading every file.";
+
+const DOC_FIND: &str = r"```tool
+FIND_FILES
+path: .
+pattern: **/*.rs
+```
+List files matching a wildcard pattern (`*` and `?` per part, `**` crosses directories). A pattern without `/` matches file names anywhere in the tree.";
+
 impl ToolRegistry {
     /// All built-in tools, all enabled.
     pub fn builtin() -> Self {
@@ -168,6 +182,8 @@ impl ToolRegistry {
             ("RUN_COMMAND", DOC_RUN),
             ("DELETE_FILE", DOC_DELETE),
             ("MOVE_FILE", DOC_MOVE),
+            ("SEARCH", DOC_SEARCH),
+            ("FIND_FILES", DOC_FIND),
         ]
         .into_iter()
         .map(|(name, doc)| ToolDef {
@@ -266,10 +282,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_offers_seven_tools_all_enabled() {
+    fn builtin_offers_nine_tools_all_enabled() {
         let reg = ToolRegistry::builtin();
-        assert_eq!(reg.all().len(), 7);
-        assert_eq!(reg.visible().count(), 7);
+        assert_eq!(reg.all().len(), 9);
+        assert_eq!(reg.visible().count(), 9);
     }
 
     #[test]
@@ -277,7 +293,7 @@ mod tests {
         let mut reg = ToolRegistry::builtin();
         assert!(reg.set_enabled("LIST_DIR", false));
         assert!(!reg.enabled("list_dir")); // case-insensitive
-        assert_eq!(reg.visible().count(), 6);
+        assert_eq!(reg.visible().count(), 8);
         assert!(!reg.visible().any(|t| t.name == "LIST_DIR"));
         // unknown names refuse to toggle
         assert!(!reg.set_enabled("NOT_A_TOOL", false));
@@ -300,11 +316,11 @@ mod tests {
     fn mode_filters_visible_tools() {
         let mut reg = ToolRegistry::builtin();
         assert_eq!(reg.mode(), Mode::Confirm);
-        assert_eq!(reg.visible().count(), 7);
-        // read-only: only the two pure-read tools remain
+        assert_eq!(reg.visible().count(), 9);
+        // read-only: only the pure-read tools remain
         reg.set_mode(Mode::ReadOnly);
         let names: Vec<&str> = reg.visible().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["READ_FILE", "LIST_DIR"]);
+        assert_eq!(names, vec!["READ_FILE", "LIST_DIR", "SEARCH", "FIND_FILES"]);
         // custom tools are state-changing too
         reg.add_custom(ToolDef {
             name: "NMAP_SCAN".into(),
@@ -316,7 +332,7 @@ mod tests {
         assert!(!reg.visible().any(|t| t.name == "NMAP_SCAN"));
         // auto shows everything enabled again
         reg.set_mode(Mode::Auto);
-        assert_eq!(reg.visible().count(), 8);
+        assert_eq!(reg.visible().count(), 10);
     }
 
     #[test]

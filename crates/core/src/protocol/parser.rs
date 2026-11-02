@@ -52,6 +52,8 @@ pub fn parse(text: &str) -> ParsedOutput {
     let mut cmd_cwd: Option<String> = None;
     let mut cmd_timeout: Option<u32> = None;
     let mut move_to: Option<String> = None;
+    let mut query: Option<String> = None;
+    let mut pattern: Option<String> = None;
 
     // drop the candidate block back into prose (aborted / malformed)
     fn abort(block: &mut Vec<String>, prose: &mut Vec<String>) {
@@ -86,6 +88,8 @@ pub fn parse(text: &str) -> ParsedOutput {
                         | "RUN_COMMAND"
                         | "DELETE_FILE"
                         | "MOVE_FILE"
+                        | "SEARCH"
+                        | "FIND_FILES"
                 ) {
                     name = t.to_string();
                     state = State::Params;
@@ -139,6 +143,8 @@ pub fn parse(text: &str) -> ParsedOutput {
                         &command,
                         &cmd_cwd,
                         cmd_timeout,
+                        &query,
+                        &pattern,
                     ) {
                         Some(action) => {
                             block.clear(); // consumed
@@ -161,6 +167,8 @@ pub fn parse(text: &str) -> ParsedOutput {
                         &mut command,
                         &mut cmd_cwd,
                         &mut cmd_timeout,
+                        &mut query,
+                        &mut pattern,
                     );
                     state = State::Prose;
                 } else if t == "content:" && name == "WRITE_FILE" {
@@ -178,6 +186,8 @@ pub fn parse(text: &str) -> ParsedOutput {
                         "cwd" if !value.is_empty() => cmd_cwd = Some(value.to_string()),
                         "timeout" => cmd_timeout = value.parse().ok(),
                         "to" if !value.is_empty() => move_to = Some(value.to_string()),
+                        "query" if !value.is_empty() => query = Some(value.to_string()),
+                        "pattern" if !value.is_empty() => pattern = Some(value.to_string()),
                         _ => {} // unknown or empty keys are ignored, stay tolerant
                     }
                 } else if t.is_empty() {
@@ -199,6 +209,8 @@ pub fn parse(text: &str) -> ParsedOutput {
                         &mut command,
                         &mut cmd_cwd,
                         &mut cmd_timeout,
+                        &mut query,
+                        &mut pattern,
                     );
                     state = State::Prose;
                 }
@@ -251,6 +263,8 @@ fn make_action(
     command: &Option<String>,
     cmd_cwd: &Option<String>,
     cmd_timeout: Option<u32>,
+    query: &Option<String>,
+    pattern: &Option<String>,
 ) -> Option<Action> {
     if name == "RUN_COMMAND" {
         let command = command.clone()?;
@@ -293,6 +307,14 @@ fn make_action(
             let to = move_to.clone()?;
             Some(Action::MoveFile { path: p, to })
         }
+        "SEARCH" => Some(Action::Search {
+            path: p,
+            query: query.clone()?,
+        }),
+        "FIND_FILES" => Some(Action::FindFiles {
+            path: p,
+            pattern: pattern.clone()?,
+        }),
         _ => None,
     }
 }
@@ -310,6 +332,8 @@ fn reset(
     command: &mut Option<String>,
     cmd_cwd: &mut Option<String>,
     cmd_timeout: &mut Option<u32>,
+    query: &mut Option<String>,
+    pattern: &mut Option<String>,
 ) {
     name.clear();
     *path = None;
@@ -322,6 +346,8 @@ fn reset(
     *command = None;
     *cmd_cwd = None;
     *cmd_timeout = None;
+    *query = None;
+    *pattern = None;
 }
 
 /// Fold `<function name="X"> ... </function>` calls into fenced tool
@@ -444,6 +470,30 @@ mod tests {
         assert!(p.prose.contains("Let me check."), "{:?}", p.prose);
         assert!(p.prose.contains("Done."), "{:?}", p.prose);
         assert!(!p.prose.contains("```tool"), "{:?}", p.prose);
+    }
+
+    #[test]
+    fn search_and_find_files_parse() {
+        let p = parse("```tool\nSEARCH\npath: src\nquery: parse_config\n```");
+        assert_eq!(
+            p.actions[0],
+            Action::Search {
+                path: "src".into(),
+                query: "parse_config".into()
+            }
+        );
+        let p = parse("```tool\nFIND_FILES\npath: .\npattern: **/*.rs\n```");
+        assert_eq!(
+            p.actions[0],
+            Action::FindFiles {
+                path: ".".into(),
+                pattern: "**/*.rs".into()
+            }
+        );
+        // SEARCH without a query is invalid, not silently dropped to prose
+        let p = parse("```tool\nSEARCH\npath: src\n```");
+        assert!(p.actions.is_empty());
+        assert_eq!(p.invalid_blocks.len(), 1);
     }
 
     #[test]
