@@ -41,6 +41,17 @@ header {
 }
 
 .logo {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  white-space: nowrap;
+}
+.logo-mark {
+  width: 25px;
+  height: 30px;
+  display: block;
+}
+.logo-word {
   font-size: 19px;
   font-weight: 700;
   letter-spacing: 0.3px;
@@ -48,7 +59,6 @@ header {
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  white-space: nowrap;
 }
 
 .meta { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

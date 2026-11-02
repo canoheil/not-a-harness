@@ -2,3 +2,4 @@
 Cargo.lock
 nah.conf
 *.log
+__pycache__/

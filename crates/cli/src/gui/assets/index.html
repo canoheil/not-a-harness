@@ -9,7 +9,23 @@
 <body>
   <div id="app">
     <header>
-      <div class="logo">nah 🐎</div>
+      <div class="logo">
+        <svg class="logo-mark" viewBox="0 0 1000 1207" aria-hidden="true">
+          <defs>
+            <linearGradient id="horseGradient" x1="450" y1="113" x2="550" y2="1075" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#2279CA"/><stop offset="45%" stop-color="#4863B8"/><stop offset="100%" stop-color="#7157A5"/>
+            </linearGradient>
+          </defs>
+          <g fill="url(#horseGradient)" fill-rule="evenodd">
+            <path d="M 678,113 L 657,250 L 811,439 L 940,770 L 879,868 L 785,868 L 732,751 L 530,650 L 459,514 L 503,678 L 589,738 L 709,1013 L 581,1075 L 106,901 L 365,418 L 544,224 Z M 616,405 L 658,487 L 734,513 L 770,551 L 742,492 Z M 875,725 L 856,759 L 877,811 L 896,777 Z"/>
+            <polygon points="784,180 726,307 682,241"/>
+            <polygon points="518,224 369,390 124,482 191,372 358,297 263,298 337,238"/>
+            <polygon points="301,453 225,603 38,728 88,575"/>
+            <polygon points="191,671 54,929 35,822"/>
+          </g>
+        </svg>
+        <span class="logo-word">nah</span>
+      </div>
       <select id="m-model" title="model (switching starts a fresh conversation)"></select>
       <div class="meta"><span id="m-server">…</span></div>
       <div class="spacer"></div>
