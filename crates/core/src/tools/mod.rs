@@ -17,6 +17,7 @@ pub mod registry;
 
 pub use registry::{Mode, ToolDef, ToolKind, ToolRegistry};
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -57,10 +58,20 @@ impl ToolOutput {
     }
 }
 
+/// One reversible file change, popped by `/undo`.
+pub enum UndoEntry {
+    /// A file was created (`prev: None`) or overwritten/deleted.
+    File { path: String, prev: Option<String> },
+    /// A file was moved from `from` to `to`.
+    Moved { from: String, to: String },
+}
+
 pub struct ToolKit {
     root: PathBuf,
     max_tool_bytes: usize,
     registry: ToolRegistry,
+    /// LIFO snapshots of mutating tool calls (session-scoped).
+    undo: RefCell<Vec<UndoEntry>>,
 }
 
 impl ToolKit {
@@ -69,6 +80,7 @@ impl ToolKit {
             root,
             max_tool_bytes,
             registry: ToolRegistry::builtin(),
+            undo: RefCell::new(Vec::new()),
         }
     }
 
@@ -189,6 +201,16 @@ impl ToolKit {
                 confirm
             };
         let path = action.path().to_string();
+        let mutating = matches!(
+            action,
+            Action::WriteFile { .. }
+                | Action::EditFile { .. }
+                | Action::DeleteFile { .. }
+                | Action::MoveFile { .. }
+        );
+        if mutating {
+            self.push_undo(action);
+        }
         let result = match action {
             Action::Custom { name, params } => return self.run_custom(name, params, confirm),
             Action::ReadFile {
@@ -216,16 +238,18 @@ impl ToolKit {
                 .map_err(err_string),
             Action::DeleteFile { path } => self.delete_file(path, confirm).map_err(err_string),
             Action::MoveFile { path, to } => self.move_file(path, to, confirm).map_err(err_string),
+            Action::Search { path, query } => self.search(path, query).map_err(err_string),
+            Action::FindFiles { path, pattern } => {
+                self.find_files(path, pattern).map_err(err_string)
+            }
         };
         match result {
             Ok(body) => {
-                let changed = matches!(
-                    action,
-                    Action::WriteFile { .. }
-                        | Action::EditFile { .. }
-                        | Action::DeleteFile { .. }
-                        | Action::MoveFile { .. }
-                ) && !body.contains("unchanged");
+                let changed = mutating && !body.contains("unchanged");
+                if mutating && !changed {
+                    // rejected-as-identical: nothing actually changed
+                    self.undo.borrow_mut().pop();
+                }
                 ToolOutput {
                     verb,
                     path,
@@ -234,13 +258,19 @@ impl ToolKit {
                     changed,
                 }
             }
-            Err(body) => ToolOutput {
-                verb,
-                path,
-                body,
-                is_error: true,
-                changed: false,
-            },
+            Err(body) => {
+                if mutating {
+                    // failed or rejected: no state change to undo
+                    self.undo.borrow_mut().pop();
+                }
+                ToolOutput {
+                    verb,
+                    path,
+                    body,
+                    is_error: true,
+                    changed: false,
+                }
+            }
         }
     }
 
@@ -525,6 +555,220 @@ impl ToolKit {
         fs::rename(&full, &dest)
             .map_err(|e| CoreError::Tool(format!("cannot move '{rel}' to '{to}': {e}")))?;
         Ok(format!("moved '{rel}' to '{to}'."))
+    }
+
+    /// Remember the pre-change state of a mutating action for `/undo`.
+    fn push_undo(&self, action: &Action) {
+        match action {
+            Action::WriteFile { path, .. }
+            | Action::EditFile { path, .. }
+            | Action::DeleteFile { path, .. } => {
+                let prev = self
+                    .resolve(path)
+                    .ok()
+                    .and_then(|p| fs::read(&p).ok())
+                    .map(|b| String::from_utf8_lossy(&b).replace("\r\n", "\n"));
+                self.undo.borrow_mut().push(UndoEntry::File {
+                    path: path.clone(),
+                    prev,
+                });
+            }
+            Action::MoveFile { path, to } => {
+                self.undo.borrow_mut().push(UndoEntry::Moved {
+                    from: path.clone(),
+                    to: to.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Reverse the last mutating tool call (`/undo`).
+    pub fn undo_last(&self) -> Result<String, CoreError> {
+        let entry = self
+            .undo
+            .borrow_mut()
+            .pop()
+            .ok_or_else(|| CoreError::Tool("nothing to undo".into()))?;
+        match entry {
+            UndoEntry::File { path, prev } => {
+                let full = self.resolve(&path)?;
+                match prev {
+                    Some(content) => {
+                        if let Some(parent) = full.parent() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                        fs::write(&full, content).map_err(|e| {
+                            CoreError::Tool(format!("undo failed for '{path}': {e}"))
+                        })?;
+                        Ok(format!("restored '{path}' to its previous content"))
+                    }
+                    None => {
+                        if full.exists() {
+                            fs::remove_file(&full).map_err(|e| {
+                                CoreError::Tool(format!("undo failed for '{path}': {e}"))
+                            })?;
+                            Ok(format!("removed '{path}' (it did not exist before)"))
+                        } else {
+                            Ok(format!("'{path}' is already gone - nothing to restore"))
+                        }
+                    }
+                }
+            }
+            UndoEntry::Moved { from, to } => {
+                let src = self.resolve(&to)?;
+                let dest = self.resolve(&from)?;
+                if !src.exists() {
+                    return Err(CoreError::Tool(format!(
+                        "cannot undo the move: '{to}' no longer exists"
+                    )));
+                }
+                if dest.exists() {
+                    return Err(CoreError::Tool(format!(
+                        "cannot undo the move: '{from}' exists again - not overwriting it"
+                    )));
+                }
+                fs::rename(&src, &dest)
+                    .map_err(|e| CoreError::Tool(format!("undo failed: {e}")))?;
+                Ok(format!("moved '{to}' back to '{from}'"))
+            }
+        }
+    }
+
+    /// What `/undo` would reverse right now (nothing = empty stack).
+    pub fn undo_depth(&self) -> usize {
+        self.undo.borrow().len()
+    }
+
+    /// Relative, forward-slash display path (models copy these).
+    fn rel_display(&self, p: &Path) -> String {
+        let shown = p.strip_prefix(&self.root).unwrap_or(p);
+        shown.display().to_string().replace('\\', "/")
+    }
+
+    /// Case-insensitive substring search under `rel` (file or directory).
+    fn search(&self, rel: &str, query: &str) -> Result<String, CoreError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(CoreError::Tool("SEARCH needs a non-empty 'query'".into()));
+        }
+        let base = self.resolve(rel)?;
+        let mut files = Vec::new();
+        if base.is_file() {
+            files.push(base.clone());
+        } else if base.is_dir() {
+            walk_files(&base, &mut files);
+        } else {
+            return Err(CoreError::Tool(format!(
+                "path not found: '{rel}' (project root: {} - tool paths are \
+                 relative to it, like 'src/main.rs')",
+                self.rel_display(&self.root)
+            )));
+        }
+        let needle = query.to_ascii_lowercase();
+        let mut hits: Vec<String> = Vec::new();
+        let mut total = 0usize;
+        for f in &files {
+            let Ok(bytes) = fs::read(f) else { continue };
+            if bytes.contains(&0) {
+                continue; // binary
+            }
+            let text = String::from_utf8_lossy(&bytes);
+            for (i, line) in text.lines().enumerate() {
+                if line.to_ascii_lowercase().contains(&needle) {
+                    total += 1;
+                    if hits.len() < 60 {
+                        hits.push(format!(
+                            "{}:{}: {}",
+                            self.rel_display(f),
+                            i + 1,
+                            line.trim_end()
+                        ));
+                    }
+                }
+            }
+        }
+        if total == 0 {
+            return Ok(format!("no matches for '{query}' under '{rel}'"));
+        }
+        let mut body = hits.join("\n");
+        if total > hits.len() {
+            body.push_str(&format!(
+                "\n... {} more match(es) not shown - narrow the query or search a smaller path",
+                total - hits.len()
+            ));
+        }
+        body.push_str(&format!("\n({total} match(es))"));
+        Ok(self.clip(body))
+    }
+
+    /// List files matching a wildcard pattern under `rel`.
+    fn find_files(&self, rel: &str, pattern: &str) -> Result<String, CoreError> {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return Err(CoreError::Tool(
+                "FIND_FILES needs a non-empty 'pattern'".into(),
+            ));
+        }
+        let base = self.resolve(rel)?;
+        if !base.is_dir() {
+            return Err(CoreError::Tool(format!(
+                "not a directory: '{rel}' (FIND_FILES searches a directory)"
+            )));
+        }
+        // forgiving: a bare name pattern matches anywhere in the tree
+        let effective: String = if pattern.contains('/') {
+            pattern.to_string()
+        } else {
+            format!("**/{pattern}")
+        };
+        let mut files = Vec::new();
+        walk_files(&base, &mut files);
+        let mut hits: Vec<String> = Vec::new();
+        for f in &files {
+            let cand = f
+                .strip_prefix(&base)
+                .unwrap_or(f)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            if glob_match(&effective, &cand) {
+                hits.push(cand);
+            }
+        }
+        hits.sort();
+        if hits.is_empty() {
+            return Ok(format!("no files match '{pattern}' under '{rel}'"));
+        }
+        let total = hits.len();
+        let mut body = hits
+            .drain(..hits.len().min(100))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if total > 100 {
+            body.push_str(&format!(
+                "\n... {} more file(s) match - use a narrower pattern",
+                total - 100
+            ));
+        }
+        body.push_str(&format!("\n({total} file(s))"));
+        Ok(self.clip(body))
+    }
+
+    /// Size-cap tool output without splitting a multibyte character.
+    fn clip(&self, body: String) -> String {
+        if body.len() <= self.max_tool_bytes {
+            return body;
+        }
+        let mut cut = self.max_tool_bytes.min(body.len());
+        while cut > 0 && !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!(
+            "{}\n... (output truncated at {} bytes)",
+            &body[..cut],
+            self.max_tool_bytes
+        )
     }
 
     fn list_dir(&self, rel: &str) -> Result<String, CoreError> {
@@ -959,6 +1203,85 @@ fn human_size(bytes: u64) -> String {
     format!("{v:.1} {}", UNITS[i])
 }
 
+/// Skip VCS/build/hidden noise and cap the walk on huge trees.
+fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    const SKIP_DIRS: &[&str] = &["target", "node_modules", "dist", "build", "__pycache__"];
+    const MAX_FILES: usize = 20_000;
+    if out.len() >= MAX_FILES {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut names: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    names.sort();
+    for p in names {
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || SKIP_DIRS.contains(&name) {
+            continue;
+        }
+        if p.is_dir() {
+            walk_files(&p, out);
+        } else if p.is_file() {
+            out.push(p);
+            if out.len() >= MAX_FILES {
+                return;
+            }
+        }
+    }
+}
+
+/// Wildcard matching for FIND_FILES: `*` and `?` within one path part,
+/// `**` across parts. No regex (std-only, and models emit simple globs).
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let t: Vec<&str> = text.split('/').filter(|s| !s.is_empty()).collect();
+
+    fn seg_match(pat: &str, seg: &str) -> bool {
+        let pb: Vec<char> = pat.chars().collect();
+        let sb: Vec<char> = seg.chars().collect();
+        let (mut i, mut j) = (0usize, 0usize);
+        let (mut star, mut mark) = (usize::MAX, 0usize);
+        while j < sb.len() {
+            if i < pb.len() && (pb[i] == '?' || pb[i] == sb[j]) {
+                i += 1;
+                j += 1;
+            } else if i < pb.len() && pb[i] == '*' {
+                star = i;
+                mark = j;
+                i += 1;
+            } else if star != usize::MAX {
+                i = star + 1;
+                mark += 1;
+                j = mark;
+            } else {
+                return false;
+            }
+        }
+        while i < pb.len() && pb[i] == '*' {
+            i += 1;
+        }
+        i == pb.len()
+    }
+
+    fn match_from(p: &[&str], t: &[&str]) -> bool {
+        if p.is_empty() {
+            return t.is_empty();
+        }
+        if p[0] == "**" {
+            if match_from(&p[1..], t) {
+                return true;
+            }
+            return !t.is_empty() && match_from(p, &t[1..]);
+        }
+        !t.is_empty() && seg_match(p[0], t[0]) && match_from(&p[1..], &t[1..])
+    }
+
+    match_from(&p, &t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1292,6 +1615,131 @@ mod tests {
             .to_string();
         assert!(err.contains("is a directory"), "{err}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_and_find_files_help_small_models_see() {
+        let dir = std::env::temp_dir().join("nah_search_t1");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::write(
+            dir.join("src/main.rs"),
+            "fn parse_config() {}\nfn main() {}\n",
+        )
+        .unwrap();
+        fs::write(dir.join("src/lib.rs"), "pub fn Parse_Config() {}\n").unwrap();
+        fs::write(dir.join("README.md"), "no match here\n").unwrap();
+        // build noise must be ignored
+        fs::write(dir.join("target/junk.rs"), "parse_config in noise\n").unwrap();
+        let kit = ToolKit::new(dir.clone(), 64 * 1024);
+
+        // case-insensitive substring search, `file:line: text` output
+        let out = kit.search(".", "PARSE_config").unwrap();
+        assert!(out.contains("src/main.rs:1:"), "{out}");
+        assert!(out.contains("src/lib.rs:1:"), "{out}");
+        assert!(!out.contains("target/"), "build noise leaked: {out}");
+        assert!(out.contains("2 match(es)"), "{out}");
+
+        // FIND_FILES with globs; a bare pattern matches anywhere
+        let out = kit.find_files(".", "*.rs").unwrap();
+        assert!(
+            out.contains("src/main.rs") && out.contains("src/lib.rs"),
+            "{out}"
+        );
+        assert!(!out.contains("target/"), "{out}");
+        let out = kit.find_files("src", "**/*.rs").unwrap();
+        assert!(out.contains("main.rs"), "{out}");
+        let out = kit.find_files(".", "no_such_*").unwrap();
+        assert!(out.contains("no files match"), "{out}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_restores_every_mutating_tool() {
+        let dir = std::env::temp_dir().join("nah_undo_t1");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let kit = ToolKit::new(dir.clone(), 4096);
+
+        // create -> undo removes it again
+        let out = kit.run(
+            &Action::WriteFile {
+                path: "a.txt".into(),
+                content: "one\n".into(),
+            },
+            &mut |_| true,
+        );
+        assert!(!out.is_error);
+        kit.undo_last().unwrap();
+        assert!(!dir.join("a.txt").exists());
+
+        // overwrite -> undo restores the old content
+        fs::write(dir.join("a.txt"), "old\n").unwrap();
+        kit.run(
+            &Action::WriteFile {
+                path: "a.txt".into(),
+                content: "new\n".into(),
+            },
+            &mut |_| true,
+        );
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "new\n");
+        let msg = kit.undo_last().unwrap();
+        assert!(msg.contains("restored 'a.txt'"), "{msg}");
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "old\n");
+
+        // delete -> undo restores
+        kit.run(
+            &Action::DeleteFile {
+                path: "a.txt".into(),
+            },
+            &mut |_| true,
+        );
+        assert!(!dir.join("a.txt").exists());
+        kit.undo_last().unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "old\n");
+
+        // move -> undo moves back
+        kit.run(
+            &Action::MoveFile {
+                path: "a.txt".into(),
+                to: "b.txt".into(),
+            },
+            &mut |_| true,
+        );
+        assert!(dir.join("b.txt").exists());
+        let msg = kit.undo_last().unwrap();
+        assert!(msg.contains("back to 'a.txt'"), "{msg}");
+        assert!(dir.join("a.txt").exists() && !dir.join("b.txt").exists());
+
+        // rejected writes leave nothing to undo
+        let out = kit.run(
+            &Action::WriteFile {
+                path: "a.txt".into(),
+                content: "x\n".into(),
+            },
+            &mut |_| false,
+        );
+        assert!(out.is_error);
+        assert_eq!(kit.undo_depth(), 0);
+        assert!(kit
+            .undo_last()
+            .unwrap_err()
+            .to_string()
+            .contains("nothing to undo"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn glob_match_handles_stars_and_globs() {
+        assert!(glob_match("**/*.rs", "src/main.rs"));
+        assert!(glob_match("**/*.rs", "main.rs"));
+        assert!(glob_match("src/*.rs", "src/main.rs"));
+        assert!(!glob_match("src/*.rs", "src/deep/main.rs"));
+        assert!(glob_match("src/**/mod.rs", "src/a/b/mod.rs"));
+        assert!(glob_match("notes?.md", "notes1.md"));
+        assert!(!glob_match("notes?.md", "notes10.md"));
+        assert!(glob_match("*", "anything"));
     }
 
     #[test]

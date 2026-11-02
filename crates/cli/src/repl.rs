@@ -78,6 +78,14 @@ impl<'a> Repl<'a> {
                 continue;
             }
 
+            // Ctrl+P then Enter: quick model cycling. Canonical line mode
+            // cannot read single keys without breaking RTL input, so the
+            // control char arrives with the line.
+            if trimmed == "\u{10}" {
+                self.cycle_model();
+                continue;
+            }
+
             if let Some(cmd) = trimmed.strip_prefix('/') {
                 if self.handle_command(cmd.trim()) {
                     break;
@@ -230,6 +238,39 @@ impl<'a> Repl<'a> {
         ));
     }
 
+    /// Quick model cycling (pi-style): `/model` with no name, or the
+    /// Ctrl+P + Enter line.
+    fn cycle_model(&mut self) {
+        match self.session.provider.list_models() {
+            Ok(models) if models.len() >= 2 => {
+                let names: Vec<String> = models.into_iter().map(|m| m.name).collect();
+                let idx = names
+                    .iter()
+                    .position(|n| *n == self.config.model)
+                    .unwrap_or(0);
+                let next = names[(idx + 1) % names.len()].clone();
+                self.switch_model(&next);
+            }
+            Ok(_) => self.ui.info("only one model is available on this server"),
+            Err(e) => self.ui.error(&e.to_string()),
+        }
+    }
+
+    /// Switch the model; a different model starts a fresh conversation
+    /// (it must not see the old one) and needs fresh token calibration.
+    fn switch_model(&mut self, name: &str) {
+        if name == self.config.model {
+            self.ui.info(&format!("model is already {name}"));
+            return;
+        }
+        self.config.model = name.to_string();
+        self.session.reset();
+        self.session.config.model = name.to_string();
+        self.session.context.reset_token_scale();
+        self.ui
+            .ok(&format!("model set to {name} - conversation reset"));
+    }
+
     fn handle_command(&mut self, cmd: &str) -> bool {
         let (name, rest) = match cmd.split_once(' ') {
             Some((n, r)) => (n, r.trim()),
@@ -243,7 +284,7 @@ impl<'a> Repl<'a> {
   /setup            run the setup wizard (provider, URL, default model)
   /provider         scan for local model servers and switch to one
   /models           list models available on the server
-  /model <name>     switch the model
+  /model [name]     switch the model (no name = cycle to the next one)
   /ctx <n>          set the context budget (and num_ctx)
   /history <n>      number of trailing messages always kept
   /compact          summarize older history now (frees context space)
@@ -253,6 +294,7 @@ impl<'a> Repl<'a> {
   /root             show the project root
   /yes | /no        toggle auto-approve for file writes and commands
   /reset            clear conversation history and session memory
+  /undo             reverse the last file change made by the model
   /clear            clear the screen (aliases: cls, bare `clear`)
   /status           show current settings and context usage
   /exit             quit (Ctrl+C also exits)
@@ -352,21 +394,15 @@ impl<'a> Repl<'a> {
             }
             "model" => {
                 if rest.is_empty() {
-                    self.ui
-                        .info(&format!("current model: {}", self.config.model));
-                } else if rest == self.config.model {
-                    self.ui.info(&format!("model is already {rest}"));
+                    self.cycle_model();
                 } else {
-                    self.config.model = rest.to_string();
-                    // a different model should not see the old conversation
-                    self.session.reset();
-                    self.session.config.model = rest.to_string();
-                    // ...and its tokenizer needs fresh token calibration
-                    self.session.context.reset_token_scale();
-                    self.ui
-                        .ok(&format!("model set to {rest} - conversation reset"));
+                    self.switch_model(rest);
                 }
             }
+            "undo" => match self.session.tools.undo_last() {
+                Ok(msg) => self.ui.ok(&msg),
+                Err(e) => self.ui.error(&e.to_string()),
+            },
             "ctx" => {
                 if let Ok(n) = rest.parse::<usize>() {
                     self.config.ctx_tokens = n;
