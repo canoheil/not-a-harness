@@ -38,7 +38,10 @@ impl<'a> Repl<'a> {
         config: NahConfig,
     ) -> Result<Repl<'a>, CoreError> {
         let mut tools = ToolKit::new(config.root.clone(), config.max_tool_bytes);
-        for w in tools.load_custom_tools(&nah_core::config::tools_dir()) {
+        for w in tools.reload_custom_tools(&nah_core::config::custom_tool_sources(
+            &config.root,
+            config.project_tools,
+        )) {
             ui.info(&format!("[warn] {w}"));
         }
         let mut session = Session::new(
@@ -98,6 +101,12 @@ impl<'a> Repl<'a> {
             // control char arrives with the line.
             if trimmed == "\u{10}" {
                 self.cycle_model();
+                continue;
+            }
+
+            // Ctrl+O then Enter: cycle the permission mode (same trick)
+            if trimmed == "\u{f}" {
+                self.cycle_mode();
                 continue;
             }
 
@@ -195,11 +204,15 @@ impl<'a> Repl<'a> {
             None => self.list_tools(),
             Some("on") => self.toggle_tool(true, parts.next()),
             Some("off") => self.toggle_tool(false, parts.next()),
+            Some("local") => self.handle_tools_local(parts.next()),
             Some("reload") => {
-                let warnings = self
-                    .session
-                    .tools
-                    .reload_custom_tools(&nah_core::config::tools_dir());
+                let warnings =
+                    self.session
+                        .tools
+                        .reload_custom_tools(&nah_core::config::custom_tool_sources(
+                            &self.config.root,
+                            self.config.project_tools,
+                        ));
                 for w in &warnings {
                     self.ui.info(&format!("[warn] {w}"));
                 }
@@ -231,10 +244,11 @@ impl<'a> Repl<'a> {
             } else {
                 "off"
             };
-            println!("  [{status}] {}", def.name);
+            let origin = if def.project { " (project)" } else { "" };
+            println!("  [{status}] {}{origin}", def.name);
         }
         self.ui
-            .info("usage: /tools on|off <name>  |  /tools reload");
+            .info("usage: /tools on|off <name>  |  /tools reload  |  /tools local on|off");
     }
 
     fn toggle_tool(&mut self, on: bool, name: Option<&str>) {
@@ -256,8 +270,68 @@ impl<'a> Repl<'a> {
         ));
     }
 
+    /// `/tools local [on|off]` - trust (or untrust) this project's own
+    /// `.nah/tools/` directory. Trust is stored per project in the user's
+    /// own config dir, so a repository cannot enable itself.
+    fn handle_tools_local(&mut self, arg: Option<&str>) {
+        let root = self.session.tools.root().to_path_buf();
+        let dir = nah_core::config::project_tools_dir(&root);
+        match arg {
+            Some("on") | Some("off") => {
+                let on = arg == Some("on");
+                if let Err(e) = nah_core::config::set_project_trust(&root, on) {
+                    self.ui.error(&e.to_string());
+                    return;
+                }
+                let warnings =
+                    self.session
+                        .tools
+                        .reload_custom_tools(&nah_core::config::custom_tool_sources(
+                            &root,
+                            self.config.project_tools,
+                        ));
+                for w in &warnings {
+                    self.ui.info(&format!("[warn] {w}"));
+                }
+                if on {
+                    let n = self
+                        .session
+                        .tools
+                        .registry()
+                        .all()
+                        .iter()
+                        .filter(|t| t.project)
+                        .count();
+                    self.ui.ok(&format!(
+                        "project tools trusted - {n} project tool(s) active from {}",
+                        nah_core::tools::display_path(&dir)
+                    ));
+                    self.ui.info(
+                        "project tools run commands like any custom tool (always confirmed); \
+                         /tools local off revokes",
+                    );
+                } else {
+                    self.ui
+                        .ok("project tools disabled (user-global tools are unaffected).");
+                }
+            }
+            _ => {
+                let trusted = nah_core::config::project_tools_trusted(&root);
+                self.ui.info(&format!(
+                    "project tools: {} (directory: {})",
+                    if trusted {
+                        "trusted"
+                    } else {
+                        "off - `/tools local on` trusts this project"
+                    },
+                    nah_core::tools::display_path(&dir)
+                ));
+            }
+        }
+    }
+
     /// Quick model cycling (pi-style): `/model` with no name, or the
-    /// Ctrl+P + Enter line.
+    /// Ctrl+P + Enter line."""
     fn cycle_model(&mut self) {
         match self.session.provider.list_models() {
             Ok(models) if models.len() >= 2 => {
@@ -272,6 +346,14 @@ impl<'a> Repl<'a> {
             Ok(_) => self.ui.info("only one model is available on this server"),
             Err(e) => self.ui.error(&e.to_string()),
         }
+    }
+
+    /// Ctrl+O then Enter: cycle the permission mode. Canonical line mode
+    /// stays untouched (RTL-safe), exactly like Ctrl+P model cycling.
+    fn cycle_mode(&mut self) {
+        let next = self.session.tools.registry().mode().cycle();
+        self.session.tools.registry_mut().set_mode(next);
+        self.ui.ok(&format!("mode: {}", next.as_str()));
     }
 
     /// Switch the model; a different model starts a fresh conversation
@@ -527,7 +609,9 @@ impl<'a> Repl<'a> {
   /clear            clear the screen (aliases: cls, bare `clear`)
   /status           show current settings and context usage
   /exit             quit (Ctrl+C also exits)
-  (anything else is sent to the model as-is)"
+  (anything else is sent to the model as-is)
+
+keys: ctrl+c stop turn or exit | ctrl+p + enter cycle model | ctrl+o + enter cycle mode"
                 );
             }
             "setup" => {
@@ -758,7 +842,10 @@ pub fn run_oneshot(
     prompt: &str,
 ) -> Result<(), CoreError> {
     let mut tools = ToolKit::new(config.root.clone(), config.max_tool_bytes);
-    for w in tools.load_custom_tools(&nah_core::config::tools_dir()) {
+    for w in tools.reload_custom_tools(&nah_core::config::custom_tool_sources(
+        &config.root,
+        config.project_tools,
+    )) {
         ui.info(&format!("[warn] {w}"));
     }
     let mut session = Session::new(
@@ -958,5 +1045,19 @@ mod tests {
         r.current_id = Some("2000-bbbb".to_string());
         r.handle_resume("");
         assert_eq!(r.current_id.as_deref(), Some("1000-aaaa"));
+    }
+
+    #[test]
+    fn cycle_mode_wraps_through_all_modes() {
+        let dir = temp("nah_test_repl_mode");
+        let mut r = repl_with(&[], &dir);
+        use nah_core::tools::Mode;
+        assert_eq!(r.session.tools.registry().mode(), Mode::Confirm);
+        r.cycle_mode();
+        assert_eq!(r.session.tools.registry().mode(), Mode::Auto);
+        r.cycle_mode();
+        assert_eq!(r.session.tools.registry().mode(), Mode::ReadOnly);
+        r.cycle_mode();
+        assert_eq!(r.session.tools.registry().mode(), Mode::Confirm);
     }
 }

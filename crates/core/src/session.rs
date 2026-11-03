@@ -475,7 +475,10 @@ fn store_reply(reply: &str, stopped: bool, parsed: &protocol::ParsedOutput) -> S
             format!("{prose}\n\n(turn stopped by user)")
         }
     } else {
-        protocol::sanitize_text(&protocol::normalize_function_calls(reply), 40)
+        protocol::sanitize_text(
+            &protocol::normalize_function_calls(&protocol::strip_thinking(reply)),
+            40,
+        )
     }
 }
 

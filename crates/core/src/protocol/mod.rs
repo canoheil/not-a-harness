@@ -33,9 +33,11 @@
 //! ````
 
 pub mod parser;
+pub mod think;
 
 pub use self::parser::normalize_function_calls;
 pub use self::parser::parse;
+pub use self::think::{strip_thinking, ThinkChunk, ThinkFilter};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {

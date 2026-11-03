@@ -1040,8 +1040,16 @@ impl ToolKit {
     /// Load user-defined tools from `dir` (see `tools/custom.rs`).
     /// Returns one warning per skipped file or rejected definition.
     pub fn load_custom_tools(&mut self, dir: &std::path::Path) -> Vec<String> {
+        self.load_custom_tools_from(dir, false)
+    }
+
+    /// Load user-defined tools, marking them project-local when `project`
+    /// (project-local tools are only offered with explicit user trust).
+    /// Returns one warning per skipped file or rejected definition.
+    pub fn load_custom_tools_from(&mut self, dir: &std::path::Path, project: bool) -> Vec<String> {
         let (defs, mut warnings) = custom::load_dir(dir);
-        for def in defs {
+        for mut def in defs {
+            def.project = project;
             if let Err(reason) = self.registry.add_custom(def) {
                 warnings.push(format!("skipped: {reason}"));
             }
@@ -1049,10 +1057,15 @@ impl ToolKit {
         warnings
     }
 
-    /// Rescan the custom tools directory from scratch (`/tools reload`).
-    pub fn reload_custom_tools(&mut self, dir: &std::path::Path) -> Vec<String> {
+    /// Rebuild custom tools from scratch from `sources` (directory +
+    /// project-local flag pairs) - `/tools reload` and `/tools local`.
+    pub fn reload_custom_tools(&mut self, sources: &[(PathBuf, bool)]) -> Vec<String> {
         self.registry.clear_customs();
-        self.load_custom_tools(dir)
+        let mut warnings = Vec::new();
+        for (dir, project) in sources {
+            warnings.extend(self.load_custom_tools_from(dir, *project));
+        }
+        warnings
     }
 }
 
@@ -1868,7 +1881,7 @@ mod tests {
             .any(|n| n == "GOOD_TOOL"));
         // disabled state survives a reload (it lives in the config list)
         kit.registry_mut().set_enabled("GOOD_TOOL", true);
-        let warnings = kit.reload_custom_tools(&tdir);
+        let warnings = kit.reload_custom_tools(&[(tdir.clone(), false)]);
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(kit.registry().enabled("GOOD_TOOL"));
         let _ = fs::remove_dir_all(&dir);

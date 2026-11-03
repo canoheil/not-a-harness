@@ -19,6 +19,8 @@
 use std::io::Write;
 use std::sync::Mutex;
 
+use nah_core::protocol::ThinkFilter;
+
 use crate::spinner::Spinner;
 use crate::wrap::{terminal_width, wrap_line, WordWrapper};
 
@@ -200,6 +202,11 @@ pub struct Ui {
     pub width: usize,
     stream: Mutex<WordWrapper>,
     filter: Mutex<ToolBlockFilter>,
+    /// Streaming reasoning splitter: hides (or dims) `think` blocks.
+    think: Mutex<ThinkFilter>,
+    /// Style of the chunk currently flowing into the wrapper (dim = a
+    /// reasoning block); transitions start on a fresh line.
+    last_dim: Mutex<bool>,
     spinner: Mutex<Option<Spinner>>,
 }
 
@@ -245,8 +252,18 @@ impl Ui {
             width,
             stream: Mutex::new(WordWrapper::new(width)),
             filter: Mutex::new(ToolBlockFilter::new()),
+            think: Mutex::new(ThinkFilter::new(false)),
+            last_dim: Mutex::new(false),
             spinner: Mutex::new(None),
         }
+    }
+
+    /// Show reasoning ("thinking") blocks dimmed instead of hiding them.
+    pub fn set_show_thinking(&self, on: bool) {
+        self.think
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_show(on);
     }
 
     fn paint(&self, code: &str, text: &str) -> String {
@@ -323,24 +340,43 @@ impl Ui {
         }
     }
 
-    /// Streamed model text: fragments arrive over time; tool blocks are
-    /// hidden, complete wrapped prose lines are printed as they are ready.
+    /// Streamed model text: fragments arrive over time; reasoning is
+    /// hidden (or dimmed with `--thinking`), tool blocks are hidden,
+    /// complete wrapped prose lines are printed as they are ready.
     pub fn delta(&self, text: &str) {
         self.touch();
-        let visible = {
-            let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
-            filter.push(text)
+        let chunks = {
+            let mut think = self.think.lock().unwrap_or_else(|e| e.into_inner());
+            think.push(text)
         };
-        self.push_visible(&visible);
+        for c in chunks {
+            let visible = {
+                let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
+                filter.push(&c.text)
+            };
+            self.push_chunk(&visible, c.thinking);
+        }
     }
 
     /// Flush the tail of the streamed reply (end of message/turn).
     pub fn stream_flush(&self) {
+        // finish the reasoning splitter first - its tail feeds the tool filter
+        let chunks = {
+            let mut think = self.think.lock().unwrap_or_else(|e| e.into_inner());
+            think.finish()
+        };
+        for c in chunks {
+            let visible = {
+                let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
+                filter.push(&c.text)
+            };
+            self.push_chunk(&visible, c.thinking);
+        }
         let tail = {
             let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
             filter.flush()
         };
-        self.push_visible(&tail);
+        self.push_visible(&tail, false);
         let mut lines: Vec<String> = Vec::new();
         {
             let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
@@ -353,9 +389,39 @@ impl Ui {
                 println!("{l}");
             }
         }
+        *self.last_dim.lock().unwrap_or_else(|e| e.into_inner()) = false;
     }
 
-    fn push_visible(&self, text: &str) {
+    /// Push one style-homogeneous chunk; a reasoning->prose transition
+    /// (or back) starts on a fresh line so dimmed thinking never runs
+    /// into the answer.
+    fn push_chunk(&self, text: &str, dim: bool) {
+        let mut last = self.last_dim.lock().unwrap_or_else(|e| e.into_inner());
+        if *last != dim {
+            self.flush_partial(*last);
+            *last = dim;
+        }
+        self.push_visible(text, dim);
+    }
+
+    /// Emit the wrapper's buffered partial line under the given style.
+    fn flush_partial(&self, dim: bool) {
+        let mut lines: Vec<String> = Vec::new();
+        {
+            let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
+            let mut collect = |l: &str| lines.push(l.to_string());
+            stream.flush(&mut collect);
+        }
+        for l in lines {
+            if dim {
+                println!("{}", self.paint(DIM, &l));
+            } else {
+                println!("{l}");
+            }
+        }
+    }
+
+    fn push_visible(&self, text: &str, dim: bool) {
         if text.is_empty() {
             return;
         }
@@ -367,7 +433,11 @@ impl Ui {
             stream.push(text, &mut collect);
         }
         for l in lines {
-            println!("{l}");
+            if dim {
+                println!("{}", self.paint(DIM, &l));
+            } else {
+                println!("{l}");
+            }
         }
     }
 

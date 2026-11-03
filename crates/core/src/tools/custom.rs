@@ -154,6 +154,7 @@ pub fn parse_tool_file(text: &str, source: &str) -> Result<(ToolDef, Vec<String>
             kind: ToolKind::Custom,
             doc,
             custom: Some(spec),
+            project: false,
         },
         warnings,
     ))

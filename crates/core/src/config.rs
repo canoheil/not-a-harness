@@ -25,6 +25,10 @@ pub struct NahConfig {
     pub temperature: f32,
     pub auto_compact: bool,
     pub auto_approve: bool,
+    /// Show reasoning ("thinking") blocks dimmed instead of hiding them.
+    pub show_thinking: bool,
+    /// Load project-local tools for this run (see `project_tools_trusted`).
+    pub project_tools: bool,
     pub color: bool,
     pub width: Option<usize>,
     /// Tool names disabled by the user (`/tools off ...`); everything else
@@ -47,6 +51,8 @@ impl Default for NahConfig {
             temperature: 0.2,
             auto_compact: true,
             auto_approve: false,
+            show_thinking: false,
+            project_tools: false,
             color: true,
             width: None,
             disabled_tools: Vec::new(),
@@ -92,6 +98,9 @@ Options:
   --yes                  auto-approve file writes/edits and command runs
   --no-color             disable colors
   --no-compact           disable automatic history summarization
+  --thinking             show reasoning blocks dimmed (hidden by default)
+  --project-tools        also load tools from the project's .nah/tools/
+                         directory (or trust a project with /tools local on)
   --width <n>            override terminal width for text wrapping
   --version              print version
   --help                 show this help
@@ -99,7 +108,8 @@ Options:
 Settings can also be stored in a config file (KEY = VALUE):
   ~/.config/nah/nah.conf   written by the setup wizard
   ./nah.conf               per-project overrides
-or passed via environment: NAH_MODEL, NAH_URL, NAH_PROVIDER, NAH_CONFIG.
+or passed via environment: NAH_MODEL, NAH_URL, NAH_PROVIDER, NAH_CONFIG,
+  NAH_THINKING, NAH_PROJECT_TOOLS.
 ";
 
 /// The user-level config path (`$NAH_CONFIG` or `~/.config/nah/nah.conf`).
@@ -139,6 +149,84 @@ pub fn history_dir() -> PathBuf {
     PathBuf::from("nah-history")
 }
 
+/// Project-local tools directory (`.nah/tools/` in the project root).
+/// Loading it requires explicit user trust - see [`project_tools_trusted`].
+pub fn project_tools_dir(root: &Path) -> PathBuf {
+    root.join(".nah").join("tools")
+}
+
+/// Per-project trust store for project-local tools (`~/.config/nah/trust/`).
+/// One marker file per trusted project root; a repository can never write
+/// these itself, so planting tool files cannot self-enable.
+pub fn trust_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("nah")
+            .join("trust");
+    }
+    PathBuf::from("nah-trust")
+}
+
+/// Stable trust-marker file name for a project root: FNV-1a of the root
+/// path (deterministic across runs and Rust versions).
+fn trust_id(root: &Path) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in root.to_string_lossy().as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}.trust")
+}
+
+/// Trust marker path for `root` inside a specific trust directory.
+pub fn trust_marker_in(trust: &Path, root: &Path) -> PathBuf {
+    trust.join(trust_id(root))
+}
+
+/// Trust marker path for `root` in the user-level trust store.
+pub fn trust_marker(root: &Path) -> PathBuf {
+    trust_marker_in(&trust_dir(), root)
+}
+
+/// Is this project trusted for project-local tools?
+pub fn project_tools_trusted(root: &Path) -> bool {
+    trust_marker(root).exists()
+}
+
+/// Trust or untrust a project for its local tool files. The marker body
+/// stores the root path so listings can show what is trusted.
+pub fn set_project_trust(root: &Path, trusted: bool) -> Result<(), CoreError> {
+    set_project_trust_in(&trust_dir(), root, trusted)
+}
+
+/// [`set_project_trust`] with an explicit trust directory (tests).
+pub fn set_project_trust_in(trust: &Path, root: &Path, on: bool) -> Result<(), CoreError> {
+    let marker = trust_marker_in(trust, root);
+    if !on {
+        if marker.exists() {
+            std::fs::remove_file(&marker)
+                .map_err(|e| CoreError::Io(format!("cannot remove {}: {e}", marker.display())))?;
+        }
+        return Ok(());
+    }
+    std::fs::create_dir_all(trust)
+        .map_err(|e| CoreError::Io(format!("cannot create {}: {e}", trust.display())))?;
+    std::fs::write(&marker, root.to_string_lossy().as_bytes())
+        .map_err(|e| CoreError::Io(format!("cannot write {}: {e}", marker.display())))
+}
+
+/// The custom-tool directories to load for this configuration: the
+/// user-global dir always, the project's `.nah/tools/` only with explicit
+/// trust (`--project-tools` flag or a trust marker from `/tools local on`).
+pub fn custom_tool_sources(root: &Path, project_tools: bool) -> Vec<(PathBuf, bool)> {
+    let mut dirs = vec![(tools_dir(), false)];
+    if project_tools || project_tools_trusted(root) {
+        dirs.push((project_tools_dir(root), true));
+    }
+    dirs
+}
+
 /// Is there any config file? (used to decide whether to run first-time setup)
 pub fn config_exists() -> bool {
     config_path().exists() || Path::new("nah.conf").exists()
@@ -159,6 +247,7 @@ pub fn save(path: &Path, cfg: &NahConfig) -> Result<(), CoreError> {
          history = {}\n\
          temperature = {}\n\
          auto_approve = {}\n\
+         thinking = {}\n\
          disabled_tools = \"{}\"\n",
         cfg.provider.as_str(),
         cfg.url,
@@ -167,6 +256,7 @@ pub fn save(path: &Path, cfg: &NahConfig) -> Result<(), CoreError> {
         cfg.history_messages,
         cfg.temperature,
         cfg.auto_approve,
+        cfg.show_thinking,
         cfg.disabled_tools.join(","),
     );
     std::fs::write(path, text)
@@ -227,6 +317,13 @@ pub fn load_conf_file(path: &Path, cfg: &mut NahConfig) {
             "auto_compact" | "compact" => {
                 cfg.auto_compact = matches!(value, "1" | "true" | "yes");
             }
+            "thinking" | "show_thinking" => {
+                cfg.show_thinking = matches!(value, "1" | "true" | "yes");
+            }
+            // NOTE: project_tools is intentionally NOT configurable from
+            // files - a repository's nah.conf must never be able to enable
+            // its own tool files. Use --project-tools, NAH_PROJECT_TOOLS or
+            // the per-project trust markers (set_project_trust).
             "disabled_tools" => {
                 cfg.disabled_tools = value
                     .split(',')
@@ -255,6 +352,12 @@ pub fn from_args(args: &[String]) -> Result<Option<NahConfig>, CoreError> {
         if let Some(p) = ProviderKind::parse(&v) {
             cfg.provider = p;
         }
+    }
+    if let Ok(v) = std::env::var("NAH_THINKING") {
+        cfg.show_thinking = matches!(v.as_str(), "1" | "true" | "yes");
+    }
+    if let Ok(v) = std::env::var("NAH_PROJECT_TOOLS") {
+        cfg.project_tools = matches!(v.as_str(), "1" | "true" | "yes");
     }
 
     // config files (user-level first, per-project overrides)
@@ -310,6 +413,8 @@ pub fn from_args(args: &[String]) -> Result<Option<NahConfig>, CoreError> {
                     .map_err(|_| CoreError::Config("--temperature must be a number".into()))?;
             }
             "--yes" | "-y" => cfg.auto_approve = true,
+            "--thinking" => cfg.show_thinking = true,
+            "--project-tools" => cfg.project_tools = true,
             "--no-color" => cfg.color = false,
             "--no-compact" => cfg.auto_compact = false,
             "--width" => {
@@ -425,5 +530,48 @@ mod tests {
         load_conf_file(&path, &mut loaded);
         assert!(loaded.disabled_tools.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trust_markers_are_per_project_and_revocable() {
+        let trust = std::env::temp_dir().join("nah_test_trust_store");
+        let _ = std::fs::remove_dir_all(&trust);
+        let root_a = std::path::Path::new("/tmp/proj-a");
+        let root_b = std::path::Path::new("/tmp/proj-b");
+        assert!(!trust_marker_in(&trust, root_a).exists());
+        set_project_trust_in(&trust, root_a, true).unwrap();
+        assert!(trust_marker_in(&trust, root_a).exists());
+        assert!(
+            !trust_marker_in(&trust, root_b).exists(),
+            "trust is per project"
+        );
+        // deterministic naming, distinct per root
+        assert_eq!(trust_id(root_a), trust_id(root_a));
+        assert_ne!(trust_id(root_a), trust_id(root_b));
+        // the marker body stores the root path
+        let body = std::fs::read_to_string(trust_marker_in(&trust, root_a)).unwrap();
+        assert_eq!(body, "/tmp/proj-a");
+        set_project_trust_in(&trust, root_a, false).unwrap();
+        assert!(!trust_marker_in(&trust, root_a).exists());
+        // revoking twice is fine
+        set_project_trust_in(&trust, root_a, false).unwrap();
+        let _ = std::fs::remove_dir_all(&trust);
+    }
+
+    #[test]
+    fn project_tools_and_thinking_flags() {
+        let args: Vec<String> = ["--project-tools", "--thinking"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let cfg = from_args(&args).unwrap().unwrap();
+        assert!(cfg.project_tools);
+        assert!(cfg.show_thinking);
+        let cfg = from_args(&[]).unwrap().unwrap();
+        assert!(
+            !cfg.project_tools,
+            "project tools stay off without explicit opt-in"
+        );
+        assert!(!cfg.show_thinking);
     }
 }

@@ -53,6 +53,7 @@ fn main() {
     };
 
     let ui = Ui::new(cfg.color, cfg.width);
+    ui.set_show_thinking(cfg.show_thinking);
     let mut cfg = cfg;
 
     // first-run setup: no config yet and the user is in an interactive terminal
