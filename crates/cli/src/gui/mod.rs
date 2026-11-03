@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex};
 
-use nah_core::config::{tools_dir, NahConfig};
+use nah_core::config::NahConfig;
 use nah_core::error::CoreError;
 use nah_core::provider::{connect, ChatOptions};
 use nah_core::session::{Event, Session, SessionConfig};
@@ -446,12 +446,16 @@ fn tools_reload_handler(stream: &mut TcpStream, engine: &Arc<Mutex<Engine>>, sta
     if reject_if_busy(stream, state) {
         return;
     }
+    let sources = {
+        let e = engine.lock().unwrap();
+        nah_core::config::custom_tool_sources(&e.cfg.root, e.cfg.project_tools)
+    };
     let warnings = engine
         .lock()
         .unwrap()
         .session
         .tools
-        .reload_custom_tools(&nah_core::config::tools_dir());
+        .reload_custom_tools(&sources);
     let list: Vec<String> = warnings.iter().map(|w| format!("\"{}\"", esc(w))).collect();
     respond(
         stream,
@@ -743,6 +747,8 @@ fn chat_handler(
     // tool blocks stay hidden in the chat transcript (the tool cards
     // render the actions instead) - same filter the REPL uses
     let mut filter = ToolBlockFilter::new();
+    // the GUI stays clean: reasoning blocks never reach the browser
+    let mut think = nah_core::protocol::ThinkFilter::new(false);
     let mut sse = |event: &str, data: &str| {
         let _ = write!(stream, "event: {event}\ndata: {data}\n\n");
         let _ = stream.flush();
@@ -751,9 +757,14 @@ fn chat_handler(
     let mut ask = |r: &ConfirmRequest| state.ask(r);
     let mut emit = |ev: &Event<'_>| match ev {
         Event::Delta(text) => {
-            let visible = filter.push(text);
-            if !visible.is_empty() {
-                sse("delta", &format!("{{\"text\":\"{}\"}}", esc(&visible)));
+            for c in think.push(text) {
+                if c.thinking {
+                    continue;
+                }
+                let visible = filter.push(&c.text);
+                if !visible.is_empty() {
+                    sse("delta", &format!("{{\"text\":\"{}\"}}", esc(&visible)));
+                }
             }
         }
         Event::Action(a) => {
@@ -834,7 +845,10 @@ fn chat_handler(
 pub fn serve_listener(listener: TcpListener, cfg: NahConfig) -> Result<(), CoreError> {
     let provider = connect(cfg.provider, &cfg.url)?;
     let mut tools = ToolKit::new(cfg.root.clone(), cfg.max_tool_bytes);
-    for w in tools.load_custom_tools(&tools_dir()) {
+    for w in tools.reload_custom_tools(&nah_core::config::custom_tool_sources(
+        &cfg.root,
+        cfg.project_tools,
+    )) {
         eprintln!("[warn] {w}");
     }
     if cfg.auto_approve {

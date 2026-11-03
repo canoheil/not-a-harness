@@ -29,9 +29,12 @@ enum State {
 }
 
 pub fn parse(text: &str) -> ParsedOutput {
+    // reasoning blocks are not part of the answer: strip them first so
+    // tool calls inside reasoning never execute and prose stays clean
+    let text = super::think::strip_thinking(text);
     // small non-coder models often emit `<function name="...">` XML calls
     // instead of fenced blocks - fold those into the fenced form first.
-    let text = normalize_function_calls(text);
+    let text = normalize_function_calls(&text);
     let mut out = ParsedOutput::default();
 
     // prose lines accumulated so far

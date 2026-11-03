@@ -196,6 +196,8 @@ Options:
   --yes                   auto-approve file writes and command runs
   --no-color              disable colors
   --no-compact            disable automatic history summarization
+  --thinking             show reasoning blocks dimmed (hidden by default)
+  --project-tools        also load tools from the project's .nah/tools/
   --width <n>             override terminal width for text wrapping
   --gui                 start the web GUI instead of the terminal UI
   --port <n>            port for the web GUI (default: 8787)
@@ -205,7 +207,7 @@ Options:
 
 ### REPL commands
 
-`Ctrl+C` cancels a running turn; at an idle prompt it exits.
+`Ctrl+C` cancels a running turn; at an idle prompt it exits. `Ctrl+P` + Enter cycles the model, `Ctrl+O` + Enter cycles the permission mode (both stay line-based, so bidirectional input keeps working).
 
 | Command | Description |
 |---|---|
@@ -220,7 +222,7 @@ Options:
 | `/resume [n\|id]` | continue a saved conversation (no argument = most recent) |
 | `/tail [n]` | show or set the trailing-message window |
 | `/files` | files currently held in the working set |
-| `/tools [on\|off <name>\|reload]` | manage built-in and custom tools |
+| `/tools [on\|off <name>\|reload\|local]` | manage built-in and custom tools; `local on\|off` (un)trusts this project's own `.nah/tools/` |
 | `/mode [name]` | permission mode: `read-only` / `confirm` / `auto` |
 | `/root [dir]` | show or change the project root |
 | `/compact` | summarize older history now |
@@ -309,7 +311,9 @@ timeout: 120
 
 Custom tools execute like `RUN_COMMAND`: output is captured and size-capped, and **every call goes through the confirmation dialog showing the fully resolved command** — you approve exactly what will run. Manage them with `/tools off <NAME>` and `/tools reload`.
 
-Broken tool files are skipped with a warning and never break startup. Project-local tool files are intentionally **not** supported: a repository must never be able to plant tools in your setup.
+Broken tool files are skipped with a warning and never break startup.
+
+**Project-local tools.** A project may ship its own tool files in `.nah/tools/`, but they are never loaded just because you cloned the repository - enabling them requires an explicit, per-project act of trust: run `/tools local on` inside the project (or start the session with `--project-tools`). Trust is recorded in your own user config directory, one marker per project root, so a repository can never write itself into your setup; `/tools local off` revokes it instantly. Project-local tools are marked `(project)` in `/tools` and behave exactly like user-defined tools otherwise.
 
 ## Context Management
 
@@ -320,6 +324,8 @@ Every request is assembled within a fixed token budget (`--ctx`, default 4096):
 3. **Pinned task** — the original request never leaves the context.
 4. **Working set** — contents of recently used files, newest first, bounded to ~80% of the budget.
 5. **Trailing history** — the last N messages verbatim (`--history`, default 5).
+
+Reasoning ("thinking") blocks some models emit are never part of the answer: they are stripped before parsing (tool calls inside reasoning never execute), never stored in history, and hidden from the output. Pass `--thinking` to watch them stream by dimmed.
 
 When the project has a `.nah/memory.md` file, its content is pinned at the top of the system prompt as a **project memory** block (capped so it cannot crowd out the working set). The model maintains that file with the ordinary file tools, so durable facts - architecture, conventions, decisions - survive compaction and small context windows. Inspect or clear it with `/memory`.
 

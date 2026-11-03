@@ -90,6 +90,7 @@ impl LlmProvider for OpenAiCompatProvider {
         }
 
         let mut full = String::new();
+        let mut in_think = false;
         for line in lines {
             let line = line?;
             let line = line.trim();
@@ -115,17 +116,40 @@ impl LlmProvider for OpenAiCompatProvider {
             if let Some(err) = parsed.get("error").and_then(|v| v.as_str()) {
                 return Err(CoreError::Provider(format!("server error: {err}")));
             }
-            if let Some(delta) = parsed
+            let d = parsed
                 .get("choices")
                 .and_then(|c| c.as_arr())
                 .and_then(|c| c.first())
-                .and_then(|c| c.get("delta"))
-                .and_then(|d| d.get("content"))
+                .and_then(|c| c.get("delta"));
+            // reasoning fields (DeepSeek-style servers): wrap in think
+            // tags so the shared text pipeline hides (or dims) them
+            if let Some(delta) = d
+                .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
                 .and_then(|c| c.as_str())
             {
                 if !delta.is_empty() {
-                    full.push_str(delta);
-                    if !on_delta(delta) {
+                    let chunk = if in_think {
+                        delta.to_string()
+                    } else {
+                        in_think = true;
+                        format!("{}{delta}", crate::protocol::think::THINK_OPEN)
+                    };
+                    full.push_str(&chunk);
+                    if !on_delta(&chunk) {
+                        return Ok(full);
+                    }
+                }
+            }
+            if let Some(delta) = d.and_then(|d| d.get("content")).and_then(|c| c.as_str()) {
+                if !delta.is_empty() {
+                    let chunk = if in_think {
+                        in_think = false;
+                        format!("{}{delta}", crate::protocol::think::THINK_CLOSE)
+                    } else {
+                        delta.to_string()
+                    };
+                    full.push_str(&chunk);
+                    if !on_delta(&chunk) {
                         // stop requested (user cancelled) - return what we have
                         return Ok(full);
                     }
@@ -148,6 +172,10 @@ impl LlmProvider for OpenAiCompatProvider {
                     });
                 }
             }
+        }
+        if in_think {
+            // truncated reply: close the block for the text pipeline
+            full.push_str(crate::protocol::think::THINK_CLOSE);
         }
         Ok(full)
     }

@@ -46,6 +46,15 @@ impl Mode {
     pub fn allows(&self, name: &str) -> bool {
         *self != Mode::ReadOnly || !is_state_changing(name)
     }
+
+    /// Next mode in the read-only -> confirm -> auto cycle.
+    pub fn cycle(self) -> Mode {
+        match self {
+            Mode::ReadOnly => Mode::Confirm,
+            Mode::Confirm => Mode::Auto,
+            Mode::Auto => Mode::ReadOnly,
+        }
+    }
 }
 
 /// Tools that can change state. Everything except the two pure-read
@@ -63,6 +72,9 @@ pub struct ToolDef {
     pub doc: String,
     /// Execution spec for user-defined tools (none for built-ins).
     pub custom: Option<CustomSpec>,
+    /// Loaded from a project-local tools directory (needs explicit user
+    /// trust - see `config::project_tools_trusted`).
+    pub project: bool,
 }
 
 /// A user-defined tool from `~/.config/nah/tools/*.tool`: a command
@@ -191,6 +203,7 @@ impl ToolRegistry {
             kind: ToolKind::Builtin,
             doc: doc.to_string(),
             custom: None,
+            project: false,
         })
         .collect();
         Self {
@@ -327,6 +340,7 @@ mod tests {
             kind: ToolKind::Custom,
             doc: String::new(),
             custom: Some(CustomSpec::default()),
+            project: false,
         })
         .unwrap();
         assert!(!reg.visible().any(|t| t.name == "NMAP_SCAN"));
@@ -346,5 +360,12 @@ mod tests {
         assert!(Mode::ReadOnly.allows("READ_FILE"));
         assert!(!Mode::ReadOnly.allows("RUN_COMMAND"));
         assert!(Mode::Auto.allows("RUN_COMMAND"));
+    }
+
+    #[test]
+    fn mode_cycle_wraps() {
+        assert_eq!(Mode::ReadOnly.cycle(), Mode::Confirm);
+        assert_eq!(Mode::Confirm.cycle(), Mode::Auto);
+        assert_eq!(Mode::Auto.cycle(), Mode::ReadOnly);
     }
 }

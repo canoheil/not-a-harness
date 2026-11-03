@@ -123,6 +123,7 @@ impl LlmProvider for OllamaProvider {
         }
 
         let mut full = String::new();
+        let mut in_think = false;
         for line in lines {
             let line = line?;
             if line.trim().is_empty() {
@@ -133,14 +134,40 @@ impl LlmProvider for OllamaProvider {
             if let Some(err) = parsed.get("error").and_then(|v| v.as_str()) {
                 return Err(CoreError::Provider(format!("Ollama error: {err}")));
             }
+            // reasoning field of thinking models: wrap it in think tags so
+            // the shared text pipeline hides (or dims) it uniformly
+            if let Some(delta) = parsed
+                .get("message")
+                .and_then(|m| m.get("thinking"))
+                .and_then(|c| c.as_str())
+            {
+                if !delta.is_empty() {
+                    let chunk = if in_think {
+                        delta.to_string()
+                    } else {
+                        in_think = true;
+                        format!("{}{delta}", crate::protocol::think::THINK_OPEN)
+                    };
+                    full.push_str(&chunk);
+                    if !on_delta(&chunk) {
+                        return Ok(full);
+                    }
+                }
+            }
             if let Some(delta) = parsed
                 .get("message")
                 .and_then(|m| m.get("content"))
                 .and_then(|c| c.as_str())
             {
                 if !delta.is_empty() {
-                    full.push_str(delta);
-                    if !on_delta(delta) {
+                    let chunk = if in_think {
+                        in_think = false;
+                        format!("{}{delta}", crate::protocol::think::THINK_CLOSE)
+                    } else {
+                        delta.to_string()
+                    };
+                    full.push_str(&chunk);
+                    if !on_delta(&chunk) {
                         // stop requested (user cancelled) - return what we have
                         return Ok(full);
                     }
@@ -156,6 +183,10 @@ impl LlmProvider for OllamaProvider {
                         .unwrap_or(0.0) as usize,
                 });
             }
+        }
+        if in_think {
+            // truncated reply: close the block for the text pipeline
+            full.push_str(crate::protocol::think::THINK_CLOSE);
         }
         Ok(full)
     }
