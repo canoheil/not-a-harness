@@ -21,6 +21,7 @@ use std::sync::Mutex;
 
 use nah_core::protocol::ThinkFilter;
 
+use crate::markdown::Markdown;
 use crate::spinner::Spinner;
 use crate::wrap::{terminal_width, wrap_line, WordWrapper};
 
@@ -201,6 +202,8 @@ pub struct Ui {
     pub color: bool,
     pub width: usize,
     stream: Mutex<WordWrapper>,
+    /// Streaming markdown renderer for prose (thinking bypasses it).
+    md: Mutex<Markdown>,
     filter: Mutex<ToolBlockFilter>,
     /// Streaming reasoning splitter: hides (or dims) `think` blocks.
     think: Mutex<ThinkFilter>,
@@ -210,15 +213,15 @@ pub struct Ui {
     spinner: Mutex<Option<Spinner>>,
 }
 
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
+pub(crate) const RESET: &str = "\x1b[0m";
+pub(crate) const BOLD: &str = "\x1b[1m";
+pub(crate) const DIM: &str = "\x1b[2m";
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const BLUE: &str = "\x1b[34m";
-const MAGENTA: &str = "\x1b[35m";
-const CYAN: &str = "\x1b[36m";
+pub(crate) const YELLOW: &str = "\x1b[33m";
+pub(crate) const BLUE: &str = "\x1b[34m";
+pub(crate) const MAGENTA: &str = "\x1b[35m";
+pub(crate) const CYAN: &str = "\x1b[36m";
 
 /// The startup mascot: a little horse saying "nah!".
 const MASCOT: [&str; 5] = [
@@ -241,6 +244,12 @@ pub fn mascot_rows(width: usize) -> Vec<&'static str> {
     }
 }
 
+fn markdown(width: usize, color: bool) -> Markdown {
+    let mut md = Markdown::new(width);
+    md.set_color(color);
+    md
+}
+
 impl Ui {
     pub fn new(color: bool, width: Option<usize>) -> Ui {
         if color {
@@ -251,6 +260,7 @@ impl Ui {
             color,
             width,
             stream: Mutex::new(WordWrapper::new(width)),
+            md: Mutex::new(markdown(width, color)),
             filter: Mutex::new(ToolBlockFilter::new()),
             think: Mutex::new(ThinkFilter::new(false)),
             last_dim: Mutex::new(false),
@@ -376,19 +386,10 @@ impl Ui {
             let mut filter = self.filter.lock().unwrap_or_else(|e| e.into_inner());
             filter.flush()
         };
-        self.push_visible(&tail, false);
-        let mut lines: Vec<String> = Vec::new();
-        {
-            let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
-            let mut collect = |l: &str| lines.push(l.to_string());
-            stream.flush(&mut collect);
-        }
-        if !lines.is_empty() {
-            self.touch();
-            for l in lines {
-                println!("{l}");
-            }
-        }
+        self.push_chunk(&tail, false);
+        // end of message: close open markdown blocks and any dim tail
+        self.md_finish();
+        self.flush_dim_wrapper();
         *self.last_dim.lock().unwrap_or_else(|e| e.into_inner()) = false;
     }
 
@@ -401,27 +402,31 @@ impl Ui {
             self.flush_partial(*last);
             *last = dim;
         }
-        self.push_visible(text, dim);
+        if dim {
+            self.push_dim(text);
+        } else {
+            self.push_md(text);
+        }
     }
 
-    /// Emit the wrapper's buffered partial line under the given style.
+    /// Emit the buffer of the stage that was active before a style
+    /// transition (dim wrapper, or the markdown partial line).
     fn flush_partial(&self, dim: bool) {
-        let mut lines: Vec<String> = Vec::new();
-        {
-            let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
-            let mut collect = |l: &str| lines.push(l.to_string());
-            stream.flush(&mut collect);
-        }
-        for l in lines {
-            if dim {
-                println!("{}", self.paint(DIM, &l));
-            } else {
-                println!("{l}");
+        if dim {
+            self.flush_dim_wrapper();
+        } else {
+            let mut lines: Vec<String> = Vec::new();
+            {
+                let mut md = self.md.lock().unwrap_or_else(|e| e.into_inner());
+                let mut collect = |l: &str| lines.push(l.to_string());
+                md.flush_partial(&mut collect);
             }
+            self.print_md_lines(&lines);
         }
     }
 
-    fn push_visible(&self, text: &str, dim: bool) {
+    /// Dimmed reasoning text: plain wrap + DIM paint, no markdown.
+    fn push_dim(&self, text: &str) {
         if text.is_empty() {
             return;
         }
@@ -433,10 +438,55 @@ impl Ui {
             stream.push(text, &mut collect);
         }
         for l in lines {
-            if dim {
-                println!("{}", self.paint(DIM, &l));
-            } else {
-                println!("{l}");
+            println!("{}", self.paint(DIM, &l));
+        }
+    }
+
+    fn flush_dim_wrapper(&self) {
+        let mut lines: Vec<String> = Vec::new();
+        {
+            let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
+            let mut collect = |l: &str| lines.push(l.to_string());
+            stream.flush(&mut collect);
+        }
+        for l in lines {
+            println!("{}", self.paint(DIM, &l));
+        }
+    }
+
+    /// Prose goes through the markdown renderer; its logical lines are
+    /// wrapped for the terminal and printed as they complete.
+    fn push_md(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let mut lines: Vec<String> = Vec::new();
+        {
+            let mut md = self.md.lock().unwrap_or_else(|e| e.into_inner());
+            let mut collect = |l: &str| lines.push(l.to_string());
+            md.push(text, &mut collect);
+        }
+        self.print_md_lines(&lines);
+    }
+
+    fn md_finish(&self) {
+        let mut lines: Vec<String> = Vec::new();
+        {
+            let mut md = self.md.lock().unwrap_or_else(|e| e.into_inner());
+            let mut collect = |l: &str| lines.push(l.to_string());
+            md.finish(&mut collect);
+        }
+        self.print_md_lines(&lines);
+    }
+
+    fn print_md_lines(&self, lines: &[String]) {
+        if lines.is_empty() {
+            return;
+        }
+        self.touch();
+        for l in lines {
+            for w in wrap_line(l, self.width) {
+                println!("{w}");
             }
         }
     }
