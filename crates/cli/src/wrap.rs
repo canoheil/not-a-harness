@@ -125,36 +125,161 @@ fn is_wide(u: u32) -> bool {
     )
 }
 
+/// Byte length of the ANSI escape sequence at the start of `s` (0 when
+/// there is none). Covers CSI (`ESC [ ... final`) and OSC (`ESC ] ...
+/// BEL` or `ESC \`) so styled text measures at its visible width.
+pub fn ansi_len(s: &str) -> usize {
+    let b = s.as_bytes();
+    if b.first() != Some(&0x1b) {
+        return 0;
+    }
+    match b.get(1) {
+        Some(&b'[') => {
+            let mut i = 2;
+            while i < b.len() && !(0x40..=0x7E).contains(&b[i]) {
+                i += 1;
+            }
+            (i + 1).min(b.len())
+        }
+        Some(&b']') => {
+            let mut i = 2;
+            while i < b.len() {
+                if b[i] == 0x07 {
+                    return i + 1;
+                }
+                if b[i] == 0x1b && b.get(i + 1) == Some(&0x5c) {
+                    return i + 2;
+                }
+                i += 1;
+            }
+            b.len()
+        }
+        Some(_) => 2,
+        None => 1,
+    }
+}
+
+/// Visible width: escape sequences count zero.
 pub fn display_width(s: &str) -> usize {
-    s.chars().map(char_width).sum()
+    let mut w = 0usize;
+    let mut rest = s;
+    while !rest.is_empty() {
+        let esc = ansi_len(rest);
+        if esc > 0 {
+            rest = &rest[esc..];
+        } else {
+            let c = rest.chars().next().unwrap_or(' ');
+            w += char_width(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    w
+}
+
+/// The SGR style still active at the end of `s`: every escape since the
+/// last reset. Used to carry styles across wrapped lines.
+fn open_style(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while !rest.is_empty() {
+        let esc = ansi_len(rest);
+        if esc > 0 {
+            let seq = &rest[..esc];
+            rest = &rest[esc..];
+            if seq == "\x1b[0m" || seq == "\x1b[m" {
+                out.clear();
+            } else {
+                out.push_str(seq);
+            }
+        } else {
+            let c = rest.chars().next().unwrap_or(' ');
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
+/// Fold the escapes of `word` into the running style state.
+fn scan_style(style: &mut String, word: &str) {
+    let mut rest = word;
+    while !rest.is_empty() {
+        let esc = ansi_len(rest);
+        if esc > 0 {
+            let seq = &rest[..esc];
+            rest = &rest[esc..];
+            if seq == "\x1b[0m" || seq == "\x1b[m" {
+                style.clear();
+            } else {
+                style.push_str(seq);
+            }
+        } else {
+            let c = rest.chars().next().unwrap_or(' ');
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+}
+
+/// One output line must be self-contained: close any style that is still
+/// open at its end so colors never bleed into unrelated output.
+fn sealed(line: &str, style: &str) -> String {
+    if style.is_empty() {
+        line.to_string()
+    } else {
+        format!("{line}\x1b[0m")
+    }
 }
 
 /// Wrap one logical line into lines of at most `width` display columns.
-/// Breaks at spaces when possible, hard-splits overlong words.
+/// Breaks at spaces when possible, hard-splits overlong words. ANSI
+/// escapes are zero-width glue: never split across a break, and a style
+/// opened before a wrap is closed at the line end and reopened on the
+/// continuation so colors stay attached to their text.
 pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     if display_width(line) <= width {
-        return vec![line.to_string()];
+        let style = open_style(line);
+        return vec![sealed(line, &style)];
     }
     let mut out = Vec::new();
     let mut current = String::new();
     let mut current_w = 0usize;
+    let mut style = String::new(); // style active at the end of `current`
 
     // split keeping empty segments so multiple spaces survive-ish
     for (i, word) in line.split(' ').enumerate() {
         let sep = if i == 0 { 0 } else { 1 };
         let w = display_width(word);
         if current_w + sep + w > width && !current.is_empty() {
-            out.push(std::mem::take(&mut current));
+            let line = sealed(&std::mem::take(&mut current), &style);
+            out.push(line);
             current_w = 0;
+            if !style.is_empty() {
+                current.push_str(&style);
+            }
         }
         if w > width {
             // hard-split a very long word on char boundaries
-            for c in word.chars() {
+            let mut rest = word;
+            while !rest.is_empty() {
+                let esc = ansi_len(rest);
+                if esc > 0 {
+                    // escapes never split and never cost width
+                    let seq = &rest[..esc];
+                    rest = &rest[esc..];
+                    current.push_str(seq);
+                    scan_style(&mut style, seq);
+                    continue;
+                }
+                let c = rest.chars().next().unwrap_or(' ');
+                rest = &rest[c.len_utf8()..];
                 let cw = char_width(c);
                 if current_w + cw > width && !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
+                    let line = sealed(&std::mem::take(&mut current), &style);
+                    out.push(line);
                     current_w = 0;
+                    if !style.is_empty() {
+                        current.push_str(&style);
+                    }
                 }
                 current.push(c);
                 current_w += cw;
@@ -166,10 +291,11 @@ pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
             }
             current.push_str(word);
             current_w += w;
+            scan_style(&mut style, word);
         }
     }
     if !current.is_empty() {
-        out.push(current);
+        out.push(sealed(&current, &style));
     }
     if out.is_empty() {
         out.push(String::new());
@@ -178,9 +304,12 @@ pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
 }
 
 /// Streaming wrapper: feed fragments as they arrive, take complete lines.
+/// A style that is open when a fragment ends is carried into the next
+/// one, so markup split across deltas still renders correctly.
 pub struct WordWrapper {
     pending: String,
     width: usize,
+    carry: String,
 }
 
 impl WordWrapper {
@@ -188,6 +317,7 @@ impl WordWrapper {
         WordWrapper {
             pending: String::new(),
             width: width.max(8),
+            carry: String::new(),
         }
     }
 
@@ -197,51 +327,67 @@ impl WordWrapper {
         while let Some(pos) = self.pending.find('\n') {
             let logical: String = self.pending.drain(..=pos).collect();
             let logical = logical.trim_end_matches('\n');
-            for l in wrap_line(logical, self.width) {
-                on_line(&l);
-            }
+            self.emit_logical(logical, on_line);
         }
         // complete any fully-occupied logical line at word boundaries
         if display_width(&self.pending) > self.width {
             if let Some(cut) = self.pending.rfind(' ') {
                 if cut > 0 {
                     let logical: String = self.pending.drain(..=cut).collect();
-                    for l in wrap_line(logical.trim_end(), self.width) {
-                        on_line(&l);
-                    }
+                    self.emit_logical(logical.trim_end(), on_line);
                 }
             } else if !self.pending.is_empty() {
-                // no space at all: the line is one huge word - emit complete chunks
+                // no space at all: the line is one huge word - emit complete
+                // chunks, keeping escape sequences uncut
                 while display_width(&self.pending) > self.width {
+                    let src = std::mem::take(&mut self.pending);
                     let mut take = String::new();
-                    let mut w = 0;
-                    let mut rest = String::new();
+                    let mut tail = String::new();
+                    let mut w = 0usize;
                     let mut overflow = false;
-                    for c in self.pending.chars() {
+                    let mut i = 0usize;
+                    while i < src.len() {
+                        let esc = ansi_len(&src[i..]);
+                        if esc > 0 {
+                            let dst = if overflow { &mut tail } else { &mut take };
+                            dst.push_str(&src[i..i + esc]);
+                            i += esc;
+                            continue;
+                        }
+                        let c = src[i..].chars().next().unwrap_or(' ');
                         let cw = char_width(c);
                         if !overflow && w + cw <= self.width {
                             take.push(c);
                             w += cw;
                         } else {
                             overflow = true;
-                            rest.push(c);
+                            tail.push(c);
                         }
+                        i += c.len_utf8();
                     }
-                    self.pending = rest;
+                    self.pending = tail;
                     on_line(&take);
                 }
             }
         }
     }
 
+    /// Wrap one logical chunk, carrying open styles across the boundary.
+    fn emit_logical(&mut self, logical: &str, on_line: &mut dyn FnMut(&str)) {
+        let input = format!("{}{}", self.carry, logical);
+        self.carry = open_style(&input);
+        for l in wrap_line(&input, self.width) {
+            on_line(&l);
+        }
+    }
+
     /// Emit whatever is left (end of the reply).
     pub fn flush(&mut self, on_line: &mut dyn FnMut(&str)) {
         if !self.pending.is_empty() {
-            for l in wrap_line(&self.pending, self.width) {
-                on_line(&l);
-            }
-            self.pending.clear();
+            let pending = std::mem::take(&mut self.pending);
+            self.emit_logical(&pending, on_line);
         }
+        self.carry.clear();
     }
 }
 
@@ -287,6 +433,146 @@ mod tests {
     fn hard_split_long_word() {
         let lines = wrap_line("abcdefghij", 4);
         assert_eq!(lines, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn ansi_len_covers_csi_and_osc() {
+        for seq in [
+            "\u{1b}[1m",
+            "\u{1b}[38;2;1;2;3m",
+            "\u{1b}[m",
+            "\u{1b}]8;;http://x\u{7}",
+            "\u{1b}]8;;http://x\u{1b}\\",
+        ] {
+            assert_eq!(super::ansi_len(seq), seq.len(), "seq {seq:?}");
+        }
+        assert_eq!(super::ansi_len("plain"), 0);
+    }
+
+    #[test]
+    fn width_skips_escapes() {
+        assert_eq!(super::display_width("\u{1b}[1mhi\u{1b}[0m"), 2);
+        assert_eq!(super::display_width("\u{1b}]8;;http://x\u{7}link"), 4);
+    }
+
+    #[test]
+    fn open_style_tracks_since_last_reset() {
+        assert_eq!(super::open_style("plain"), "");
+        assert_eq!(
+            super::open_style("\u{1b}[1m\u{1b}[32mbold green"),
+            "\u{1b}[1m\u{1b}[32m"
+        );
+        assert_eq!(
+            super::open_style("\u{1b}[1mx\u{1b}[0m\u{1b}[33my"),
+            "\u{1b}[33m"
+        );
+    }
+
+    #[test]
+    fn sealed_appends_reset_only_when_open() {
+        assert_eq!(super::sealed("hi", ""), "hi");
+        assert_eq!(
+            super::sealed("\u{1b}[32mhi", "\u{1b}[32m"),
+            "\u{1b}[32mhi\u{1b}[0m"
+        );
+    }
+
+    #[test]
+    fn styled_wrap_points_match_plain() {
+        let plain = "the quick brown fox jumps over the lazy dog";
+        let styled = format!("\u{1b}[1m{plain}\u{1b}[0m");
+        let a = super::wrap_line(plain, 12);
+        let b = super::wrap_line(&styled, 12);
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(super::display_width(x), super::display_width(y));
+        }
+    }
+
+    /// True when every escape sequence in the line terminates inside it.
+    fn escapes_whole(l: &str) -> bool {
+        let b = l.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == 0x1b {
+                let mut j = i + 1;
+                if j >= b.len() {
+                    return false;
+                }
+                match b[j] {
+                    b'[' => {
+                        j += 1;
+                        let mut found = false;
+                        while j < b.len() {
+                            if (0x40..=0x7E).contains(&b[j]) {
+                                found = true;
+                                break;
+                            }
+                            j += 1;
+                        }
+                        if !found {
+                            return false;
+                        }
+                        j += 1;
+                    }
+                    b']' => {
+                        j += 1;
+                        let mut found = false;
+                        while j < b.len() {
+                            if b[j] == 0x07 {
+                                found = true;
+                                j += 1;
+                                break;
+                            }
+                            if b[j] == 0x1b && j + 1 < b.len() && b[j + 1] == 0x5c {
+                                found = true;
+                                j += 2;
+                                break;
+                            }
+                            j += 1;
+                        }
+                        if !found {
+                            return false;
+                        }
+                    }
+                    _ => j += 1,
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn wrapper_never_splits_escapes() {
+        let mut w = super::WordWrapper::new(6);
+        let mut lines = Vec::new();
+        let mut sink = |l: &str| lines.push(l.to_string());
+        // escapes land at and around the width boundary
+        w.push("abcdefgh\u{1b}[32mxy\u{1b}[0m", &mut sink);
+        w.flush(&mut sink);
+        assert!(lines.len() >= 2, "expected wrapping: {lines:?}");
+        for l in &lines {
+            assert!(escapes_whole(l), "mid-escape split: {l:?}");
+        }
+        assert!(lines.iter().any(|l| l.contains("\u{1b}[32m")));
+    }
+
+    #[test]
+    fn wrapper_carries_style_across_pushes() {
+        let mut w = super::WordWrapper::new(10);
+        let mut lines = Vec::new();
+        let mut sink = |l: &str| lines.push(l.to_string());
+        // the open green lands in one delta, the text and reset in later ones
+        w.push("\u{1b}[32mhe", &mut sink);
+        w.push("llo wo", &mut sink);
+        w.push("rld\u{1b}[0m", &mut sink);
+        w.flush(&mut sink);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "\u{1b}[32mhello\u{1b}[0m");
+        assert_eq!(lines[1], "\u{1b}[32mworld\u{1b}[0m");
     }
 
     #[test]

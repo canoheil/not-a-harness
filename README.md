@@ -30,7 +30,7 @@ It is built for locally-run models on modest hardware. The entire program is a s
 | 🔒 **Safe by default** | Every write shows a diff and asks first; commands and custom tools show the exact resolved command. Paths are sandboxed to the project root. |
 | 🧩 **Custom tools** | Wrap domain-specific commands as plain-text tool files; toggle built-ins per workflow. The model only ever sees the tools that are enabled. |
 | 💾 **Persistent conversations** | Every chat is saved automatically; `/resume` continues any past conversation and `/history <text>` searches through all of them. A per-project memory file keeps durable notes in the model's context. |
-| ⚡ **Polished terminal UX** | Streaming output, per-turn speed and context meters, first-run setup wizard, and a one-shot mode for scripts and CI. |
+| ⚡ **Polished terminal UX** | Streaming output with markdown rendering — headings, code panels, tables, lists, quotes — plus per-turn speed and context meters, a first-run setup wizard, and a one-shot mode for scripts and CI. |
 | 🖥 **Web GUI included** | `nah --gui` opens a local browser interface: chat, inline tool approvals, permission modes, live context meter. |
 
 ## Installation

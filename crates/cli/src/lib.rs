@@ -4,6 +4,7 @@
 
 pub mod ctrlc;
 pub mod gui;
+pub mod markdown;
 pub mod repl;
 pub mod setup;
 pub mod spinner;
