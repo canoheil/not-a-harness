@@ -74,7 +74,7 @@ impl<'a> Repl<'a> {
             "model: {} | server: {} | ctx: {} tokens | ctrl+c stops a running turn",
             self.config.model, self.config.url, self.config.ctx_tokens
         ));
-        println!();
+        self.ui.blank();
 
         let stdin = std::io::stdin();
         loop {
@@ -131,7 +131,7 @@ impl<'a> Repl<'a> {
     }
 
     fn run_turn(&mut self, input: &str) {
-        println!();
+        self.ui.blank();
         self.ui.divider();
         self.ui.spinner_on();
 
@@ -143,7 +143,6 @@ impl<'a> Repl<'a> {
         let mut on_event = |ev: &Event<'_>| match ev {
             Event::Delta(text) => ui.delta(text),
             Event::Action(a) => {
-                println!();
                 ui.action(&nah_core::protocol::action_label(a));
             }
             Event::ToolResult(o) => {
@@ -154,14 +153,13 @@ impl<'a> Repl<'a> {
                 }
             }
             Event::Info(msg) => {
-                println!();
                 ui.info(msg);
             }
             Event::TurnDone => {
                 ui.stream_flush();
                 ui.spinner_off();
-                println!();
-                println!();
+                ui.blank();
+                ui.blank();
             }
         };
 
@@ -871,7 +869,6 @@ pub fn run_oneshot(
     let mut on_event = |ev: &Event<'_>| match ev {
         Event::Delta(text) => ui.delta(text),
         Event::Action(a) => {
-            println!();
             ui.action(&nah_core::protocol::action_label(a));
         }
         Event::ToolResult(o) => {
@@ -882,13 +879,12 @@ pub fn run_oneshot(
             }
         }
         Event::Info(msg) => {
-            println!();
             ui.info(msg);
         }
         Event::TurnDone => {
             ui.stream_flush();
             ui.spinner_off();
-            println!();
+            ui.blank();
         }
     };
     crate::ctrlc::set_turn_running(true);
