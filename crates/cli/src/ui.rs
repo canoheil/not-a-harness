@@ -17,6 +17,7 @@
 //! its own font fallback, so the warning is skipped there.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use nah_core::protocol::ThinkFilter;
@@ -210,6 +211,11 @@ pub struct Ui {
     /// Style of the chunk currently flowing into the wrapper (dim = a
     /// reasoning block); transitions start on a fresh line.
     last_dim: Mutex<bool>,
+    /// Spacing rhythm: what the screen looks like right now.
+    printed: AtomicBool,
+    last_blank: AtomicBool,
+    /// A tool block just closed; the next prose run opens with a gap.
+    gap_prose: AtomicBool,
     spinner: Mutex<Option<Spinner>>,
 }
 
@@ -244,6 +250,79 @@ pub fn mascot_rows(width: usize) -> Vec<&'static str> {
     }
 }
 
+/// Tool kind -> (icon, color) for the action card.
+fn tool_style(verb: &str) -> (&'static str, &'static str) {
+    match verb {
+        "WRITE_FILE" | "EDIT_FILE" | "MOVE_FILE" => ("\u{270e}", MAGENTA),
+        "DELETE_FILE" => ("\u{232b}", RED),
+        "RUN_COMMAND" => ("\u{25b6}", GREEN),
+        "READ_FILE" | "LIST_DIR" | "SEARCH" | "FIND_FILES" => ("\u{2315}", CYAN),
+        _ => ("\u{25b6}", GREEN), // custom tools execute something
+    }
+}
+
+/// Split an action label into (verb, target, meta). For commands and
+/// custom tools the whole remainder stays as the target.
+fn card_parts(label: &str) -> (&str, &str, &str) {
+    let (verb, rest) = label.split_once(' ').unwrap_or((label, ""));
+    let builtin = matches!(
+        verb,
+        "READ_FILE"
+            | "WRITE_FILE"
+            | "EDIT_FILE"
+            | "LIST_DIR"
+            | "RUN_COMMAND"
+            | "DELETE_FILE"
+            | "MOVE_FILE"
+            | "SEARCH"
+            | "FIND_FILES"
+    );
+    // commands and custom tools keep the remainder intact
+    if !builtin || verb == "RUN_COMMAND" {
+        return (verb, rest, "");
+    }
+    let (target, meta) = rest.split_once(' ').unwrap_or((rest, ""));
+    (verb, target, meta)
+}
+
+/// Bordered confirmation preview. Returns plain rows tagged 'b' (border),
+/// 'p' (path), 'd' (diff/preview content) or 'm' (truncation note).
+fn confirm_frame(kind: &str, path: &str, preview: &str, width: usize) -> Vec<(String, char)> {
+    let outer = width.clamp(30, 72);
+    let inner = outer.saturating_sub(4).max(12);
+    let mut rows: Vec<(String, char)> = Vec::new();
+    let mut top = format!("\u{250c}\u{2500}\u{2500} {kind} ");
+    while top.chars().count() < outer - 1 {
+        top.push('\u{2500}');
+    }
+    top.push('\u{2510}');
+    rows.push((top, 'b'));
+    for l in crate::wrap::wrap_line(path, inner) {
+        rows.push((format!("\u{2502} {l}"), 'p'));
+    }
+    const MAX_PREVIEW: usize = 60;
+    let total = preview.lines().filter(|l| !l.trim().is_empty()).count();
+    for (shown, line) in preview.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+        if shown >= MAX_PREVIEW {
+            rows.push((
+                format!("\u{2502} \u{2026} (+{} more lines)", total - shown),
+                'm',
+            ));
+            break;
+        }
+        for l in crate::wrap::wrap_line(line, inner) {
+            rows.push((format!("\u{2502} {l}"), 'd'));
+        }
+    }
+    let mut bottom = String::from("\u{2514}");
+    while bottom.chars().count() < outer - 1 {
+        bottom.push('\u{2500}');
+    }
+    bottom.push('\u{2518}');
+    rows.push((bottom, 'b'));
+    rows
+}
+
 fn markdown(width: usize, color: bool) -> Markdown {
     let mut md = Markdown::new(width);
     md.set_color(color);
@@ -264,6 +343,9 @@ impl Ui {
             filter: Mutex::new(ToolBlockFilter::new()),
             think: Mutex::new(ThinkFilter::new(false)),
             last_dim: Mutex::new(false),
+            printed: AtomicBool::new(false),
+            last_blank: AtomicBool::new(true),
+            gap_prose: AtomicBool::new(false),
             spinner: Mutex::new(None),
         }
     }
@@ -317,11 +399,39 @@ impl Ui {
     // ------------------------------------------------------------------
 
     /// Print one complete logical line, wrapped to the terminal width.
+    /// Record what the last printed line looked like (blank or not).
+    fn note(&self, blank: bool) {
+        self.printed.store(true, Ordering::Relaxed);
+        self.last_blank.store(blank, Ordering::Relaxed);
+    }
+
+    /// Print one blank line (always).
+    pub fn blank(&self) {
+        println!();
+        self.note(true);
+    }
+
+    /// Print one blank line only when the screen does not already end
+    /// with one - keeps section spacing at exactly one blank line.
+    fn sep(&self) {
+        if self.printed.load(Ordering::Relaxed) && !self.last_blank.load(Ordering::Relaxed) {
+            self.blank();
+        }
+    }
+
+    /// A tool block closed: the next prose run opens with a blank line.
+    fn prose_gap(&self) {
+        if self.gap_prose.swap(false, Ordering::Relaxed) {
+            self.sep();
+        }
+    }
+
     pub fn line(&self, text: &str) {
         self.touch();
         for l in wrap_line(text, self.width) {
             println!("{l}");
         }
+        self.note(text.trim().is_empty());
     }
 
     /// Clear the terminal screen (best-effort across consoles).
@@ -345,6 +455,7 @@ impl Ui {
             for l in wrap_line(text, self.width) {
                 println!("{code}{l}{RESET}");
             }
+            self.note(text.trim().is_empty());
         } else {
             self.line(text);
         }
@@ -431,6 +542,7 @@ impl Ui {
             return;
         }
         self.touch();
+        self.prose_gap();
         let mut lines: Vec<String> = Vec::new();
         {
             let mut stream = self.stream.lock().unwrap_or_else(|e| e.into_inner());
@@ -439,6 +551,7 @@ impl Ui {
         }
         for l in lines {
             println!("{}", self.paint(DIM, &l));
+            self.note(l.trim().is_empty());
         }
     }
 
@@ -449,8 +562,12 @@ impl Ui {
             let mut collect = |l: &str| lines.push(l.to_string());
             stream.flush(&mut collect);
         }
+        if !lines.is_empty() {
+            self.prose_gap();
+        }
         for l in lines {
             println!("{}", self.paint(DIM, &l));
+            self.note(l.trim().is_empty());
         }
     }
 
@@ -484,10 +601,12 @@ impl Ui {
             return;
         }
         self.touch();
+        self.prose_gap();
         for l in lines {
             for w in wrap_line(l, self.width) {
                 println!("{w}");
             }
+            self.note(l.trim().is_empty());
         }
     }
 
@@ -502,13 +621,14 @@ impl Ui {
         }
         self.line_colored(DIM, "lean local-LLM agent harness - text tool protocol");
         self.line_colored(DIM, "type /help for commands, /exit to quit");
-        println!();
+        self.blank();
     }
 
     pub fn divider(&self) {
         self.touch();
         let line = "─".repeat(self.width.min(60));
         println!("{}", self.paint(DIM, &line));
+        self.note(false);
     }
 
     pub fn prompt(&self) {
@@ -523,7 +643,22 @@ impl Ui {
     pub fn action(&self, label: &str) {
         self.stream_flush();
         self.touch();
-        self.line_colored(MAGENTA, &format!("tool: {label}"));
+        self.sep();
+        let (verb, target, meta) = card_parts(label);
+        let (icon, color) = tool_style(verb);
+        let head = self.paint(&format!("{color}{BOLD}"), &format!("{icon} {verb}"));
+        let mid = if target.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", self.paint(CYAN, target))
+        };
+        let tail = if meta.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", self.paint(DIM, meta))
+        };
+        println!("  {head}{mid}{tail}");
+        self.note(false);
     }
 
     /// Quiet status line (dim) - context usage and similar telemetry.
@@ -540,15 +675,16 @@ impl Ui {
         let mut hidden = 0usize;
         for line in body.lines().filter(|l| !l.trim().is_empty()) {
             if shown < MAX_LINES {
-                self.line_colored(DIM, &format!("| {line}"));
+                self.line_colored(DIM, &format!("  \u{2502} {line}"));
                 shown += 1;
             } else {
                 hidden += 1;
             }
         }
         if hidden > 0 {
-            self.line_colored(DIM, &format!("| ... ({hidden} more lines)"));
+            self.line_colored(DIM, &format!("  \u{2502} \u{2026} ({hidden} more lines)"));
         }
+        self.gap_prose.store(true, Ordering::Relaxed);
     }
 
     pub fn tool_err(&self, body: &str) {
@@ -559,15 +695,16 @@ impl Ui {
         let mut hidden = 0usize;
         for line in body.lines().filter(|l| !l.trim().is_empty()) {
             if shown < MAX_LINES {
-                self.line_colored(RED, &format!("| {line}"));
+                self.line_colored(RED, &format!("  \u{2502} {line}"));
                 shown += 1;
             } else {
                 hidden += 1;
             }
         }
         if hidden > 0 {
-            self.line_colored(RED, &format!("| ... ({hidden} more lines)"));
+            self.line_colored(RED, &format!("  \u{2502} \u{2026} ({hidden} more lines)"));
         }
+        self.gap_prose.store(true, Ordering::Relaxed);
     }
 
     pub fn info(&self, text: &str) {
@@ -594,7 +731,12 @@ impl Ui {
         flush();
         let mut answer = String::new();
         let ok = std::io::stdin().read_line(&mut answer).is_ok();
+        // piped stdin has no echo: end the prompt line ourselves
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            println!();
+        }
         self.spinner_on();
+        self.note(false);
         ok && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
     }
 
@@ -603,6 +745,7 @@ impl Ui {
     pub fn confirm(&self, verb: &str, path: &str, preview: &str, is_new: bool) -> bool {
         self.stream_flush();
         self.spinner_off();
+        self.sep();
         let kind = if verb == "RUN_COMMAND" {
             "run command"
         } else if is_new {
@@ -610,19 +753,28 @@ impl Ui {
         } else {
             "modify file"
         };
-        println!("\n{} -> {}", self.paint(BOLD, kind), self.paint(CYAN, path));
-        for line in preview.lines().take(60) {
-            let colored = if line.starts_with('+') {
-                self.paint(GREEN, line)
-            } else if line.starts_with('-') || line.starts_with('!') {
-                self.paint(RED, line)
-            } else if line.starts_with("...") {
-                self.paint(DIM, line)
-            } else {
-                line.to_string()
+        for (row, tag) in confirm_frame(kind, path, preview, self.width) {
+            let colored = match tag {
+                'b' | 'm' => self.paint(DIM, &row),
+                'p' => self.paint(CYAN, &row),
+                _ => {
+                    let body = row.strip_prefix('\u{2502}').unwrap_or(&row);
+                    let body = body.strip_prefix(' ').unwrap_or(body);
+                    if body.starts_with('+') {
+                        self.paint(GREEN, &row)
+                    } else if body.starts_with('-') || body.starts_with('!') {
+                        self.paint(RED, &row)
+                    } else if body.starts_with("...") {
+                        self.paint(DIM, &row)
+                    } else {
+                        row.clone()
+                    }
+                }
             };
             println!("  {colored}");
         }
+        self.note(false);
+        self.gap_prose.store(true, Ordering::Relaxed);
         self.ask_yes_no("Apply this change? [y/N]")
     }
 
@@ -1100,5 +1252,76 @@ mod tests {
         out.push_str(&f.push("Real answer.\n"));
         out.push_str(&f.flush());
         assert_eq!(out, "Real answer.\n");
+    }
+
+    #[test]
+    fn tool_style_maps_verbs_to_icons() {
+        assert_eq!(tool_style("WRITE_FILE").0, "\u{270e}");
+        assert_eq!(tool_style("EDIT_FILE").0, "\u{270e}");
+        assert_eq!(tool_style("MOVE_FILE").0, "\u{270e}");
+        assert_eq!(tool_style("DELETE_FILE").0, "\u{232b}");
+        assert_eq!(tool_style("RUN_COMMAND").0, "\u{25b6}");
+        assert_eq!(tool_style("READ_FILE").0, "\u{2315}");
+        assert_eq!(tool_style("LIST_DIR").0, "\u{2315}");
+        assert_eq!(tool_style("SEARCH").0, "\u{2315}");
+        assert_eq!(tool_style("FIND_FILES").0, "\u{2315}");
+        assert_eq!(tool_style("GREET").0, "\u{25b6}"); // custom tools
+    }
+
+    #[test]
+    fn card_parts_split_labels() {
+        assert_eq!(
+            card_parts("WRITE_FILE demo/x.txt (3 lines)"),
+            ("WRITE_FILE", "demo/x.txt", "(3 lines)")
+        );
+        assert_eq!(
+            card_parts("MOVE_FILE a.txt -> b.txt"),
+            ("MOVE_FILE", "a.txt", "-> b.txt")
+        );
+        // commands and custom tools keep the remainder intact
+        assert_eq!(
+            card_parts("RUN_COMMAND echo hi there"),
+            ("RUN_COMMAND", "echo hi there", "")
+        );
+        assert_eq!(card_parts("GREET name: sam"), ("GREET", "name: sam", ""));
+    }
+
+    #[test]
+    fn confirm_frame_is_bordered_and_bounded() {
+        let rows = confirm_frame("create file", "demo/x.txt", "+ one\n+ two", 40);
+        assert_eq!(rows[0].1, 'b');
+        assert!(rows[0].0.starts_with('\u{250c}'));
+        assert_eq!(rows.last().unwrap().1, 'b');
+        assert!(rows.last().unwrap().0.starts_with('\u{2514}'));
+        let path_rows: Vec<_> = rows.iter().filter(|r| r.1 == 'p').collect();
+        assert_eq!(path_rows.len(), 1);
+        assert!(path_rows[0].0.starts_with("\u{2502} "));
+        let diff_rows: Vec<_> = rows.iter().filter(|r| r.1 == 'd').collect();
+        assert_eq!(diff_rows.len(), 2);
+        for (row, _) in &rows {
+            assert!(row.chars().count() <= 40, "row too wide: {row:?}");
+        }
+    }
+
+    #[test]
+    fn confirm_frame_truncates_long_previews() {
+        let preview: String = (0..70).map(|i| format!("+ line {i}\n")).collect();
+        let rows = confirm_frame("modify file", "x.txt", &preview, 60);
+        let notes: Vec<_> = rows.iter().filter(|r| r.1 == 'm').collect();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].0.contains("+10 more lines"), "{:?}", notes[0].0);
+        let diff_rows = rows.iter().filter(|r| r.1 == 'd').count();
+        assert_eq!(diff_rows, 60);
+    }
+
+    #[test]
+    fn confirm_frame_wraps_long_lines() {
+        let long = format!("+ {}", "x".repeat(120));
+        let rows = confirm_frame("run command", "cmd", &long, 50);
+        let diff_rows: Vec<_> = rows.iter().filter(|r| r.1 == 'd').collect();
+        assert!(diff_rows.len() > 1, "expected wrapping: {rows:?}");
+        for (row, _) in &rows {
+            assert!(row.chars().count() <= 50, "row too wide: {row:?}");
+        }
     }
 }
