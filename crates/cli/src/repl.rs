@@ -70,15 +70,16 @@ impl<'a> Repl<'a> {
     pub fn run(&mut self) -> Result<(), CoreError> {
         self.ui.banner();
         self.ui.rtl_font_notice();
-        self.ui.info(&format!(
-            "model: {} | server: {} | ctx: {} tokens | ctrl+c stops a running turn",
-            self.config.model, self.config.url, self.config.ctx_tokens
+        self.ui.stat(&crate::ui::status_header(
+            &self.config.model,
+            &self.config.url,
+            self.config.ctx_tokens,
         ));
         self.ui.blank();
 
         let stdin = std::io::stdin();
         loop {
-            self.ui.prompt();
+            self.ui.prompt(self.session.tools.registry().mode());
             // Read one line per prompt with a *fresh* lock on stdin. Holding
             // `stdin.lock().lines()` across the loop would keep the global
             // stdin mutex locked and deadlock every later read_line (confirm
@@ -169,17 +170,17 @@ impl<'a> Repl<'a> {
         match result {
             Ok(stats) => {
                 if stats.est_tokens > 0 {
-                    self.ui.stat(&format!(
-                        "~{} tok/s - {} tokens - {:.1}s",
+                    self.ui.stat(&crate::ui::status_speed(
                         stats.tokens_per_sec().round() as u64,
                         stats.est_tokens,
-                        stats.gen_secs
+                        stats.gen_secs,
                     ));
                 }
                 let (tokens, msgs) = self.session.context_usage();
-                self.ui.stat(&format!(
-                    "context: ~{}/{} tokens - {} messages  (/compact summarizes)",
-                    tokens, self.config.ctx_tokens, msgs
+                self.ui.stat(&crate::ui::status_context(
+                    tokens,
+                    self.config.ctx_tokens,
+                    msgs,
                 ));
             }
             Err(e) => {
@@ -789,9 +790,10 @@ keys: ctrl+c stop turn or exit | ctrl+p + enter cycle model | ctrl+o + enter cyc
                 Ok(n) => {
                     self.ui.ok(&format!("summarized {n} older message(s)."));
                     let (tokens, msgs) = self.session.context_usage();
-                    self.ui.stat(&format!(
-                        "context: ~{}/{} tokens - {} messages",
-                        tokens, self.config.ctx_tokens, msgs
+                    self.ui.stat(&crate::ui::status_context(
+                        tokens,
+                        self.config.ctx_tokens,
+                        msgs,
                     ));
                 }
                 Err(e) => self.ui.error(&e.to_string()),
@@ -894,11 +896,10 @@ pub fn run_oneshot(
     ui.stream_flush();
     let stats = result?;
     if stats.est_tokens > 0 {
-        ui.stat(&format!(
-            "~{} tok/s - {} tokens - {:.1}s",
+        ui.stat(&crate::ui::status_speed(
             stats.tokens_per_sec().round() as u64,
             stats.est_tokens,
-            stats.gen_secs
+            stats.gen_secs,
         ));
     }
     Ok(())
