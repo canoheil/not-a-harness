@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use nah_core::protocol::ThinkFilter;
+use nah_core::tools::Mode;
 
 use crate::markdown::Markdown;
 use crate::spinner::Spinner;
@@ -222,12 +223,12 @@ pub struct Ui {
 pub(crate) const RESET: &str = "\x1b[0m";
 pub(crate) const BOLD: &str = "\x1b[1m";
 pub(crate) const DIM: &str = "\x1b[2m";
-const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
-pub(crate) const YELLOW: &str = "\x1b[33m";
-pub(crate) const BLUE: &str = "\x1b[34m";
-pub(crate) const MAGENTA: &str = "\x1b[35m";
-pub(crate) const CYAN: &str = "\x1b[36m";
+const RED: &str = "\x1b[38;2;255;123;114m"; // #ff7b72
+const GREEN: &str = "\x1b[38;2;126;231;135m"; // #7ee787
+pub(crate) const YELLOW: &str = "\x1b[38;2;227;179;65m";
+pub(crate) const BLUE: &str = "\x1b[38;2;77;166;255m";
+pub(crate) const MAGENTA: &str = "\x1b[38;2;167;139;250m";
+pub(crate) const CYAN: &str = "\x1b[38;2;122;200;255m";
 
 /// The startup mascot: a little horse saying "nah!".
 const MASCOT: [&str; 5] = [
@@ -248,6 +249,32 @@ pub fn mascot_rows(width: usize) -> Vec<&'static str> {
     } else {
         vec!["nah!"]
     }
+}
+
+/// Prompt color follows the permission mode.
+fn mode_color(mode: Mode) -> &'static str {
+    match mode {
+        Mode::ReadOnly => RED,
+        Mode::Confirm => YELLOW,
+        Mode::Auto => GREEN,
+    }
+}
+
+/// Turn-end speed line: `⚡ ~123 tok/s · 456 tokens · 1.2s`.
+pub(crate) fn status_speed(tok_s: u64, tokens: usize, secs: f64) -> String {
+    format!("\u{26a1} ~{tok_s} tok/s \u{b7} {tokens} tokens \u{b7} {secs:.1}s")
+}
+
+/// Context meter: `▤ ~159/4096 ctx · 4 messages · /compact summarizes`.
+pub(crate) fn status_context(used: usize, cap: usize, msgs: usize) -> String {
+    format!("\u{25a4} ~{used}/{cap} ctx \u{b7} {msgs} messages \u{b7} /compact summarizes")
+}
+
+/// Startup header: `◆ model · ◇ server · ▤ 4096 ctx · ctrl+c stops a turn`.
+pub(crate) fn status_header(model: &str, url: &str, ctx: usize) -> String {
+    format!(
+        "\u{25c6} {model} \u{b7} \u{25c7} {url} \u{b7} \u{25a4} {ctx} ctx \u{b7} ctrl+c stops a turn"
+    )
 }
 
 /// Tool kind -> (icon, color) for the action card.
@@ -631,9 +658,11 @@ impl Ui {
         self.note(false);
     }
 
-    pub fn prompt(&self) {
+    /// The prompt glyph is colored by permission mode (read-only red,
+    /// confirm yellow, auto green).
+    pub fn prompt(&self, mode: Mode) {
         self.touch();
-        print!("{} ", self.paint(CYAN, ">"));
+        print!("{} ", self.paint(mode_color(mode), ">"));
         flush();
     }
 
@@ -1323,5 +1352,32 @@ mod tests {
         for (row, _) in &rows {
             assert!(row.chars().count() <= 50, "row too wide: {row:?}");
         }
+    }
+
+    #[test]
+    fn palette_is_truecolor() {
+        for code in [BLUE, CYAN, MAGENTA, YELLOW, RED, GREEN] {
+            assert!(code.contains("38;2;"), "not truecolor: {code:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_color_follows_mode() {
+        assert_eq!(mode_color(Mode::ReadOnly), RED);
+        assert_eq!(mode_color(Mode::Confirm), YELLOW);
+        assert_eq!(mode_color(Mode::Auto), GREEN);
+    }
+
+    #[test]
+    fn status_lines_share_the_dot_style() {
+        let speed = status_speed(95842, 140, 0.0);
+        assert!(speed.starts_with('\u{26a1}'), "{speed}");
+        assert_eq!(speed.matches(" \u{b7} ").count(), 2, "{speed}");
+        let ctx = status_context(159, 4096, 4);
+        assert!(ctx.starts_with('\u{25a4}'), "{ctx}");
+        assert_eq!(ctx.matches(" \u{b7} ").count(), 2, "{ctx}");
+        let head = status_header("qwen3:1.7b", "http://localhost:11434", 4096);
+        assert!(head.starts_with('\u{25c6}'), "{head}");
+        assert_eq!(head.matches(" \u{b7} ").count(), 3, "{head}");
     }
 }
